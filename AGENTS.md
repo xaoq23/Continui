@@ -82,26 +82,36 @@ Types: `feat` `fix` `refactor` `perf` `test` `docs` `build` `ci` `chore` `style`
 2. **Plan** — for non-trivial tasks, produce a short plan: objective, affected modules, proposed changes, risks, required tests, decisions needing owner approval.
 3. **Implement** — follow existing conventions; avoid unnecessary abstractions; keep public interfaces minimal; do not silently expand task scope.
 4. **Test** — run relevant tests first, then broader ones. Record commands, results, build config, platform, compiler. Never claim a test passed without executing it.
-5. **Audit** — every code-changing task passes an independent sub-agent audit (Section 6). Mandatory.
-6. **Report** — what changed, why, files affected, test results, audit result, remaining risks.
+5. **Verify** — per risk tier (Section 6): independent audit for high-risk changes, independent task review for normal functional changes, regular checks for low-risk changes.
+6. **Report** — what changed, why, files affected, test results, verification result, remaining risks.
 
 A task is not complete merely because the code compiles.
 
-## 6. Mandatory Independent Sub-Agent Audit
+## 6. Verification by Risk Tier
 
-### 6.1 Principle
+Process exists to reduce total workload, not to add ceremony. Verification effort scales with the risk a change carries: pick the tier before review starts, and pick the lowest tier that honestly covers the risk.
 
-The agent that implements a change must not be its own auditor. An implementation agent accumulates assumptions and self-justifying reasoning (context contamination) — the same thinking that produced a defect may prevent recognizing it.
+### 6.1 Tiers
 
-Therefore: a **separate audit sub-agent** with a fresh context is required. It must not inherit the implementer's private reasoning or narrative, and must derive findings from the requirements and repository evidence itself.
+| Tier | Applies to | Required verification |
+|---|---|---|
+| **High risk** | Core runtime, memory lifetime, thread safety, rendering backend, platform interfaces, public API | Independent sub-agent audit (6.2–6.6) |
+| **Normal** | Ordinary functional changes | Independent review of the whole task, grounded in tests and code evidence (6.7) |
+| **Low risk** | Formatting, documentation fixes, local naming | Regular checks: self-review plus executed tests (6.8) |
 
-If sub-agent delegation is unavailable, report the task as **AUDIT BLOCKED**. Self-review may supplement, but never substitutes for an independent audit.
+Tier is judged by what a change *could break*, not by its size: a small diff inside the arena, channel, invalidation scheduler, renderer, platform layer, or a public header is high risk; a large but isolated example or test addition is not.
 
-### 6.2 Audit input
+### 6.2 High-risk tier: principle
+
+The implementer must not be the sole judge of high-risk work. An implementation agent accumulates assumptions and self-justifying reasoning (context contamination) — the same thinking that produced a defect may prevent recognizing it. Therefore a **separate audit sub-agent** with a fresh context audits every high-risk change; it must not inherit the implementer's private reasoning or narrative, and must derive findings from the requirements and repository evidence itself.
+
+If sub-agent delegation is unavailable on a high-risk task, report the task as **AUDIT BLOCKED**. Self-review may supplement, but never substitutes for the audit.
+
+### 6.3 Audit input
 
 Give the auditor: the original task, relevant architectural constraints, the diff / changed-file list, relevant interfaces and call sites, actual test commands and results, and any owner-approved design decisions. Do not feed it a long implementation narrative as its primary source of truth.
 
-### 6.3 Audit scope
+### 6.4 Audit scope
 
 Examine as applicable:
 
@@ -116,7 +126,7 @@ Examine as applicable:
 
 State explicitly which categories were not applicable or could not be verified.
 
-### 6.4 Report format
+### 6.5 Audit report format
 
 ```markdown
 # Independent Audit Report
@@ -133,15 +143,21 @@ Severity: **CRITICAL** (memory safety, data corruption, fundamental architectura
 
 Every finding must contain concrete evidence. Do not report speculation as confirmed defects.
 
-### 6.5 Remediation
+### 6.6 Remediation and completion
 
-The implementer classifies each finding as accepted / rejected / owner-decision; accepted findings are corrected, tests re-run, important corrections independently re-verified. Never dismiss a finding merely because it contradicts the original design; rejections need evidence-backed technical explanation. Disagreements touching public API, architecture, ownership, or threading escalate to the owner.
+The implementer classifies each finding as accepted / rejected / owner-decision; accepted findings are corrected, tests re-run, important corrections independently re-verified. Rejections need evidence-backed technical explanation. Disagreements touching public API, architecture, ownership, or threading escalate to the owner.
 
-### 6.6 Completion criteria
-
-A task is **DONE** only when: implementation complete, tests executed, independent audit completed, no unresolved CRITICAL/MAJOR findings, corrections verified, remaining warnings documented.
+A high-risk task is **DONE** only when: implementation complete, tests executed, audit completed, no unresolved CRITICAL/MAJOR findings, corrections verified, remaining warnings documented.
 
 Do not pressure the auditor toward a positive result or weaken findings for a green status. A useful audit may conclude the implementation is wrong or should be redesigned — that is the point.
+
+### 6.7 Normal tier: independent task review
+
+A fresh-context reviewer (sub-agent when available) examines the **whole** feature task, not fragments: requirement, full diff, call sites, and the executed tests. The review is grounded in code and test evidence; a short note suffices — what was checked, verdict, findings — no fixed template. Findings follow the same remediation path as 6.6.
+
+### 6.8 Low tier: regular checks
+
+Self-review plus executed tests/builds. No sub-agent, no report format. Honest records still apply (Section 12).
 
 ## 7. Communication with the Owner
 
@@ -181,7 +197,7 @@ Status vocabulary: **Implemented** / **In Progress** / **Planned** / **Proposed*
 
 ## 12. Agent Autonomy
 
-**Allowed:** reading/analyzing code, inspecting build config, adding internal helpers, adding/updating tests, fixing clearly identified bugs, improving docs within scope, running builds and tests, delegating independent audits.
+**Allowed:** reading/analyzing code, inspecting build config, adding internal helpers, adding/updating tests, fixing clearly identified bugs, improving docs within scope, running builds and tests, delegating independent audits and reviews.
 
 **Approval required:** changing public interfaces, adding dependencies, reorganizing modules, changing core architecture, destructive Git operations, creating commits, pushing, merging, removing features.
 
@@ -190,18 +206,19 @@ Status vocabulary: **Implemented** / **In Progress** / **Planned** / **Proposed*
 ## 13. Task States
 
 ```
-TODO → IN_PROGRESS → REVIEW → Independent Audit
-                                  ├─ Findings      → IN_PROGRESS
-                                  ├─ Owner Decision → BLOCKED
-                                  └─ Passed        → DONE
+TODO → IN_PROGRESS → REVIEW → Verification by tier (Section 6)
+                                  ├─ High risk      → Independent Audit   → Findings → IN_PROGRESS · Passed → DONE
+                                  ├─ Normal         → Independent Review  → Findings → IN_PROGRESS · Passed → DONE
+                                  ├─ Low risk       → Regular Checks      → DONE
+                                  └─ Owner Decision needed → BLOCKED
 ```
 
 States: `TODO` · `IN_PROGRESS` · `BLOCKED` · `REVIEW` · `AUDIT_FAILED` · `DONE`.
-Do not skip the independent audit stage for code-changing tasks.
+Pick the verification tier up front; do not inflate a low-risk change into ceremony, and do not downgrade a high-risk one.
 
 ## 14. Pull Requests
 
-Every substantial PR includes: summary, motivation, architectural impact, API changes, build/test results, platform verification, performance impact (if applicable), independent audit report, known limitations.
+Every substantial PR includes: summary, motivation, architectural impact, API changes, build/test results, platform verification, performance impact (if applicable), known limitations. PRs containing high-risk changes additionally include the independent audit report (Section 6.5); normal-tier PRs include the review note (Section 6.7).
 
 A PR must not claim completion while blocking audit findings remain unresolved.
 
@@ -212,7 +229,7 @@ A PR must not claim completion while blocking audit findings remain unresolved.
 - [ ] Public API changes and dependencies approved.
 - [ ] Relevant tests added or updated and executed.
 - [ ] No known critical defects remain.
-- [ ] Independent sub-agent audit completed; CRITICAL/MAJOR findings resolved and verified.
+- [ ] Verification completed per risk tier (Section 6); high-risk findings resolved and verified.
 - [ ] Documentation updated; remaining risks reported.
 - [ ] Owner informed of the result.
 
@@ -224,10 +241,11 @@ A PR must not claim completion while blocking audit findings remain unresolved.
 4. Prefer simple interfaces over clever abstractions.
 5. Ask the owner before making architectural decisions.
 6. Never fabricate test results or implementation progress.
-7. Never treat self-review as independent verification.
-8. Require an independent sub-agent audit for every code-changing task.
+7. Never treat self-review alone as verification for high-risk or normal-tier changes.
+8. Match verification effort to risk (Section 6); the independent audit is reserved for high-risk changes.
 9. Treat audit findings as engineering evidence, not personal criticism.
-10. Never mark an unaudited implementation as complete.
+10. Never mark a high-risk implementation complete without its audit.
+11. Every rule in this file must reduce total workload; a rule that adds ceremony without reducing risk should be proposed for removal.
 
 ---
 
