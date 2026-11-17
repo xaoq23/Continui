@@ -1,0 +1,16 @@
+# Build directories.
+build/
+
+# Dependencies (fetched by CMake or manually).
+deps/
+third_party/
+
+# Editor and tooling artifacts.
+compile_commands.json
+.vscode/
+.cache/
+.clangd/
+
+# OS artifacts.
+Thumbs.db
+.DS_Store
