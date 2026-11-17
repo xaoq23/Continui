@@ -26,6 +26,7 @@
 | ADR-014 | D3D12 / Metal 原生后端 | TBD |
 | ADR-015 | 全平台 IME 支持 | Accepted |
 | ADR-016 | 逻辑像素作为公共布局单位 | Accepted |
+| ADR-017 | 构建体系以 CMake 为唯一正式支持；自研 cizon2 暂不接入 | Accepted |
 
 ### ADR 规范
 
