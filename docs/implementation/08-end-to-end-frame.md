@@ -37,7 +37,7 @@ View = build(arena)  ──► ViewNode 树（arena 内，本帧有效）
 | 2 | Consume（Channel 补丁） | **未实现**（Channel 占位，Phase 1） |
 | 3 | Invalidate（合并失效） | `UI::invalidate()` / `merge_invalidation`（`invalidation.hpp:11`） |
 | 4 | Evaluate（重算视图） | `UI::Impl::evaluate()`（`ui.cpp:55`）：arena.reset → `ViewFn` → ViewNode 树 |
-| 5 | Reconcile（Key 匹配/Diff） | **未实现**（0.6 每帧全量重建；Phase 0.8） |
+| 5 | Reconcile（按 Key 快照复用） | 0.8：`build_commands()` 按 Key 比较 `NodeVisual` 签名，未变节点复用缓存命令（实用版 diff，非 retained 树重构） |
 | 6 | Resolve（样式） | Style 直接存在 ViewNode 上，无独立解析阶段 |
 | 7 | Layout | `solve()`（`layout_solver.cpp:266`） |
 | 8 | Paint | `UI::Impl::paint()`（`ui.cpp:100`）→ `Painter` → `BatchBuilder` |
@@ -71,11 +71,12 @@ View = build(arena)  ──► ViewNode 树（arena 内，本帧有效）
 
 多次失效不会累加执行次数；等级只取最强者（架构 §3.3）。
 
-## 与 0.8 的差距（不要误以为已实现）
+## 0.8 失效闭环（实现完成，独立审计中）
 
-- 没有 Key 匹配/diff：即使只有 count 变化，整棵树也重建
-- 没有布局脏区：所有节点重算几何
-- 没有绘制脏区：renderer 每帧全屏 clear + 重画
+- **失效分级**：`UI::paint` 按 `pending` 等级调度——`none` 跳过全部、`layout` 只重 solve（不重建 ViewFn）、`view` 重建+求解、`full` 全量。诊断计数见 `UI::frame_stats()`。
+- **按 Key 快照（实用版 Tree Diff）**：保持 arena 帧内模型（ADR-005），不引入 retained ViewNode。值类型 `DrawCommand`/`NodeVisual` 缓存按 Key 复用：只有签名（style/text/几何/LocalState/font epoch）变化的节点重新生成绘制命令；renderer 每帧仍全屏 clear + 重放命令。
+- **LocalState 事件升为 view 级**：hover/focus/IME 变化会改变 ViewFn 的投影，C3 禁止隐式依赖追踪，故保守重建视图。
+- **未做**：GPU 脏矩形合成（架构 §7.4 允许初期整窗口重绘）；跨帧 retained 节点树。
 - 键盘输入/焦点/IME 已接入（0.7）：Tab 移焦点、Enter/Space 激活按钮、`WM_CHAR` 文本输入、TSF composition 事件；Escape 仍由事件处理器直接 `app->quit()`
 
 ## 调试入口

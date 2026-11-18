@@ -16,12 +16,23 @@
 #include <continui/painter.hpp>
 #include <continui/view.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
 #include <string>
 
 namespace continui {
+
+// Per-frame stage counters (0.8). Exposed so tests can verify that explicit
+// invalidation levels actually skip unnecessary work and that unchanged nodes
+// reuse cached draw commands. Diagnostic only — not part of the drawing contract.
+struct FrameStats {
+    std::uint64_t evaluates = 0;   // ViewFn evaluations this frame's paint
+    std::uint64_t solves = 0;      // layout solves this frame's paint
+    std::uint64_t command_generations = 0;  // nodes whose draw commands were rebuilt
+    std::uint64_t glyph_shapes = 0;  // shaping calls (0 on a pure cache replay)
+};
 
 // Readback for the platform's IME: the focused input's current text and the
 // caret rectangle in client pixels. The user connects UI -> Window explicitly
@@ -78,6 +89,9 @@ public:
     // Current IME context (text + caret) for candidate positioning; valid
     // after paint(). Empty when no input is focused.
     [[nodiscard]] ImeContext ime_context() const noexcept;
+
+    // Diagnostic stage counters for the last paint() call (0.8).
+    [[nodiscard]] FrameStats frame_stats() const noexcept;
 
 private:
     struct Impl;

@@ -137,12 +137,26 @@
 
 **架构决策（业主确认）**：先不扩展样式系统，保持"HTML/CSS 解耦"方向、当前只做结构层（View 树/布局/交互）。聚焦反馈由库硬编码最小实现，不新增 Style 字段；用户若需自定义样式，留待未来样式层（Phase 1）。此前一度加入的 `Style::focus_ring` 字段已按此决策撤销。review 指出的"透明背景实心块"问题已由四条细矩形边框解决。
 
+### 0.8 阶段：失效闭环（实现完成，独立审计中）
+
+- **范围**：失效等级真正驱动阶段调度 + 按 Key 值类型快照缓存（实用版 Tree Diff）。
+- **决策落地**（业主确认）：0.8a+0.8b 本轮完成、保持 arena 帧内模型 + Key 快照缓存（不改 retained ViewNode）、不做 GPU 脏矩形合成。
+- **关键实现**（`src/render/ui.cpp`、`include/continui/ui.hpp`）：
+  - `DrawCommand`/`NodeVisual`/`NodeSnapshot` 值类型缓存，`build_commands()` 按 Key 比较签名，只有变化节点重新 shape；`replay()` 把命令重放进每帧清空的 Painter/BatchBuilder。
+  - `solve_only()` 支持 layout 级只重求解、不重建 ViewFn；`font_epoch` 在字体/measurer 变更时递增使缓存失效。
+  - `UI::frame_stats()` 暴露 evaluates/solves/command_generations/glyph_shapes 诊断计数（公共 API 新增，属测试/诊断用途，不改变绘制契约）。
+  - LocalState 变化（hover/focus/IME）的失效等级由 paint 升为 view：ViewFn 读 LocalState，C3 无隐式追踪，必须保守重建视图投影。
+  - **设计权衡（审计 Finding 3，需业主知晓）**：因此验收标准(3)"局部变化不无条件触发所有模块完整重建"只在**绘制命令层**满足（按 Key diff），view/layout 阶段对 LocalState 事件仍全量重算。这是 C3 无隐式依赖追踪的必然代价——框架无法知道 ViewFn 是否读取了 LocalState。若要更强的局部性，需引入显式的"ViewFn 读取 LocalState"声明（未来考虑）。
+  - `Invalidation::full` 额外清空按 Key 快照缓存（真正强制刷新），`view` 仍复用未变节点命令（审计 Finding 5）。
+- **验证**：`ui_test::test_invalidation_stages` 覆盖四条验收（不变零计算/layout 不重建/失效合并/局部重算 `command_generations==1`）；`ui_test::test_command_cache_content` 用真实字体 + glyph 敏感 stub 验证缓存重放字节一致、纯重放 `glyph_shapes==0`、文本变化只重绘一个节点（审计员用变异测试证明该测试能抓到丢弃缓存/陈旧 run）；clang 7/7、MSVC 6/6；Counter 目视显示正常。
+- **独立审计结论：Accept（PASS WITH WARNINGS → 修正后 Accept）**——初审计 6 项发现（1 MINOR 高优先级验证缺口 + 4 MINOR + INFO）全部处置：命令缓存测试补强、stale 快照清理、`full` 清缓存、删死成员、注释规范化、设计权衡登记。双工具链干净重编译 7/7、6/6，无项目代码警告。
+
 ## 3. 已知问题登记（未修，但已记录）
 
 | 问题 | 影响 | 归属阶段 | 代码位置 |
 |---|---|---|---|
 | 自动 Key 是位置序；按钮回调层已检测重复 Key，节点级重复未强制唯一 | 列表重排时身份错乱；违反架构 §4.3 规则 3 的严格形式 | 0.8 | `arena.hpp` / `view_tree.cpp` |
-| 无 Tree Diff / 脏区分级；任何失效整树重算 | 性能问题，不是正确性问题 | 0.8 | `ui.cpp:152` |
+| 按 Key 快照缓存未覆盖节点跨帧 retained（每帧仍 build 树）；无 GPU 脏矩形 | 性能余量，正确性无影响 | 后续 | `ui.cpp::build_commands` |
 | 事件使用上一帧布局 | resize 当帧的点击仍命中旧几何（resize 已在 paint 时触发重算，但事件先于 paint 泵出） | 0.8 / 输入阶段 | `ui.cpp:164` |
 | 字体路径仅 ASCII；TTC 取 face 0 | Unicode 路径/字体集合受限 | 后续平台阶段 | `font_manager.cpp:101` |
 | 图集无淘汰，上限 2048 | 大字数多语言时图集可能封顶 | 0.7+ | `glyph_cache.cpp:110` |

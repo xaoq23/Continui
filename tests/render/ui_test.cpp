@@ -1,10 +1,14 @@
 // UI loop tests (Phase 0.6): state -> View -> layout -> paint -> hit ->
 // callback -> explicit invalidation -> re-evaluation. Pure CPU; no GPU.
 #include <continui/ui.hpp>
+#include <continui/font.hpp>
 
 #include "batcher.hpp"
+#include "text_context.hpp"
 
 #include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <print>
 #include <string>
@@ -24,11 +28,37 @@ bool approx(const float got, const float want, const float eps = 1e-4f) {
     return std::fabs(got - want) <= eps;
 }
 
+bool same_vertices(const std::vector<continui::detail::BatchVertex>& a,
+                   const std::vector<continui::detail::BatchVertex>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    return a.empty()
+           || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0;
+}
+
 struct FakeMeasurer final : continui::TextMeasurer {
     [[nodiscard]] continui::Size measure(const std::string_view text,
                                          const float) const override {
         return {static_cast<int>(text.size()) * 10, 20};
     }
+};
+
+// Stub glyph atlas so Painter::text actually records geometry; lets us assert
+// on emitted vertices, not just stage counters (0.8 audit F1).
+struct StubAtlas final : continui::detail::TextRasterContext {
+    [[nodiscard]] continui::detail::GlyphSlot glyph(const continui::FontFace&,
+                                                    float, int,
+                                                    std::uint32_t glyph_id) override {
+        continui::detail::GlyphSlot slot;
+        // Vary UV by glyph id so different characters produce distinct geometry.
+        const float u = static_cast<float>(glyph_id % 16) / 16.0f;
+        slot.uv = {u, 0, 0.0625f, 0.5f};
+        slot.width_px = 8;
+        slot.height_px = 12;
+        return slot;
+    }
+    [[nodiscard]] std::uint64_t atlas_texture() const override { return 1; }
 };
 
 void test_interaction() {
@@ -260,6 +290,143 @@ void test_focus_feedback() {
           "hardcoded focus border is drawn even with a transparent background");
 }
 
+void test_invalidation_stages() {
+    using namespace continui;
+    struct State {
+        int a = 1;
+        int b = 2;
+    } state;
+    int builds = 0;
+    UI ui([&](FrameArena& arena, const LocalState&) {
+        ++builds;
+        Style box;
+        box.width = 100;
+        box.height = 40;
+        const auto va = Text(arena, Key{1}, std::to_string(state.a), box);
+        const auto vb = Text(arena, Key{2}, std::to_string(state.b), box);
+        return Row(arena, Key{0}, {va, vb}, Style{});
+    });
+    ui.set_text_measurer(std::make_unique<FakeMeasurer>());
+
+    detail::BatchBuilder batches;
+    auto paint = [&] {
+        batches.begin_frame(Size{800, 600});
+        Painter painter{batches};
+        ui.paint(painter, Size{800, 600});
+        batches.finish_frame();
+    };
+
+    // First paint: full build + solve + generate all node commands.
+    paint();
+    FrameStats s = ui.frame_stats();
+    check(s.evaluates == 1 && s.solves == 1,
+          "first paint evaluates and solves once");
+    check(s.command_generations == 3,
+          "first paint generates commands for root + two texts");
+
+    // No invalidation: nothing recomputed, commands replayed from cache.
+    paint();
+    s = ui.frame_stats();
+    check(s.evaluates == 0 && s.solves == 0 && s.command_generations == 0,
+          "unchanged state skips evaluate, solve, and command generation");
+
+    // Layout-level invalidation: re-solve, no view rebuild, no regeneration
+    // because geometry did not change.
+    ui.invalidate(Invalidation::layout);
+    paint();
+    s = ui.frame_stats();
+    check(s.evaluates == 0 && s.solves == 1,
+          "layout invalidation re-solves without rebuilding the view");
+    check(s.command_generations == 0,
+          "layout invalidation reuses commands when geometry is unchanged");
+
+    // Merge: paint + layout => layout (one solve, no evaluate).
+    ui.invalidate(Invalidation::paint);
+    ui.invalidate(Invalidation::layout);
+    check(ui.pending() == Invalidation::layout,
+          "paint + layout merge to layout");
+    paint();
+    s = ui.frame_stats();
+    check(s.evaluates == 0 && s.solves == 1,
+          "merged invalidation runs layout stage exactly once");
+
+    // View-level: change one text; only that node regenerates commands, the
+    // other node keeps its cached commands (0.8b per-Key diff).
+    ++state.a;
+    ui.invalidate(Invalidation::view);
+    paint();
+    s = ui.frame_stats();
+    check(s.evaluates == 1 && s.solves == 1,
+          "view invalidation re-evaluates and re-solves");
+    check(s.command_generations == 1,
+          "only the changed text node regenerates its commands");
+    check(builds == 2, "ViewFn ran once per view-level paint");
+}
+
+void test_command_cache_content() {
+    using namespace continui;
+#ifdef _WIN32
+    const std::filesystem::path font_path = "C:/Windows/Fonts/segoeui.ttf";
+#else
+    const std::filesystem::path font_path =
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+    if (!std::filesystem::exists(font_path)) {
+        std::println("SKIP: command cache content test needs a system font");
+        return;
+    }
+    FontManager fonts;
+    const auto loaded = fonts.load_file(font_path);
+    if (!loaded) {
+        std::println("SKIP: command cache content test could not load font");
+        return;
+    }
+
+    struct State {
+        int value = 1;
+    } state;
+    UI ui([&](FrameArena& arena, const LocalState&) {
+        Style box;
+        box.width = 100;
+        box.height = 40;
+        return Text(arena, Key{1}, std::to_string(state.value), box);
+    });
+    ui.set_font(*loaded);
+    StubAtlas atlas;
+
+    detail::BatchBuilder batches;
+    auto paint = [&] {
+        batches.begin_frame(Size{800, 600});
+        Painter painter{batches, &atlas};
+        ui.paint(painter, Size{800, 600});
+        batches.finish_frame();
+    };
+
+    paint();
+    const auto first = batches.vertices();
+    FrameStats s = ui.frame_stats();
+    check(!first.empty() && s.glyph_shapes > 0,
+          "first paint shapes the text and emits glyph geometry");
+
+    // Pure replay: identical geometry, no shaping at all.
+    paint();
+    check(same_vertices(batches.vertices(), first),
+          "cache replay emits byte-identical geometry");
+    s = ui.frame_stats();
+    check(s.glyph_shapes == 0 && s.command_generations == 0,
+          "cache replay performs no shaping and no command generation");
+
+    // Change the text: only this node reshapes, geometry changes.
+    ++state.value;
+    ui.invalidate(Invalidation::view);
+    paint();
+    s = ui.frame_stats();
+    check(s.glyph_shapes > 0 && s.command_generations == 1,
+          "changed text reshapes only its own node and emits new geometry");
+    check(!same_vertices(batches.vertices(), first),
+          "changed text produces different glyph geometry");
+}
+
 }  // namespace
 
 int main() {
@@ -407,6 +574,8 @@ int main() {
     test_interaction();
     test_editing_regressions();
     test_focus_feedback();
+    test_invalidation_stages();
+    test_command_cache_content();
 
     if (failures != 0) {
         std::println(stderr, "ui_test: {} check(s) failed", failures);

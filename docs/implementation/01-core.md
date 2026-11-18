@@ -33,7 +33,7 @@ core 持有 UI 的**基础契约与生命周期原语**：App/Window 句柄、Ev
 
 ### Invalidation（`include/continui/invalidation.hpp:11`）
 
-`none < paint < layout < view < full`，`merge_invalidation` 取数值较大者，满足架构 §3.3 的合并律。`UI::paint` 当前对任何非 none 等级都整树重算（0.6 简化，见 `05-render.md`）。
+`none < paint < layout < view < full`，`merge_invalidation` 取数值较大者，满足架构 §3.3 的合并律。0.8 起 `UI::paint` 按等级调度阶段：none 跳过全部、layout 只重求解、view 重建+求解、full 全量（见 `05-render.md`）。
 
 ### View 组合子（`src/layout/view_tree.cpp:10`）
 

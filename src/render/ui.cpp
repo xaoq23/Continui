@@ -69,6 +69,55 @@ std::size_t utf8_byte_offset(const std::string_view text,
     return text.size();
 }
 
+// Value-type draw commands (0.8). The renderer clears its BatchBuilder every
+// frame, so UI replays cached Painter commands into it each frame instead of
+// re-shaping text. Commands contain no arena pointers, so they survive
+// evaluate()'s arena.reset().
+enum class DrawKind : std::uint8_t { rect, rounded_rect, text };
+
+struct DrawCommand {
+    DrawKind kind = DrawKind::rect;
+    Rect bounds{};
+    Radius radius{};
+    Color color{};
+    GlyphRun run{};     // only meaningful for DrawKind::text
+    PointF origin{};    // only meaningful for DrawKind::text
+};
+
+// Everything that affects a node's appearance. Two nodes with the same
+// visual signature reuse the cached draw commands (0.8b per-Key diff).
+struct NodeVisual {
+    Style style{};
+    std::string text{};
+    Rect bounds{};
+    Rect content{};
+    std::uint8_t type = 0;
+    bool focused = false;
+    bool composing = false;
+    std::string composition{};
+    std::size_t caret = 0;
+    std::size_t selection_start = 0;
+    std::size_t selection_end = 0;
+    std::uint64_t font_epoch = 0;
+
+    [[nodiscard]] bool same_as(const NodeVisual& other) const noexcept {
+        return style == other.style && text == other.text && bounds == other.bounds
+               && content == other.content && type == other.type
+               && focused == other.focused && composing == other.composing
+               && composition == other.composition && caret == other.caret
+               && selection_start == other.selection_start
+               && selection_end == other.selection_end
+               && font_epoch == other.font_epoch;
+    }
+};
+
+struct NodeSnapshot {
+    NodeVisual visual{};
+    std::vector<DrawCommand> commands{};
+    Rect ime_caret{};
+    Rect ime_text_bounds{};
+};
+
 }  // namespace
 
 struct UI::Impl {
@@ -76,6 +125,7 @@ struct UI::Impl {
 
     ViewFn build;
     FrameArena arena;
+    View root_view{};  // last evaluated root (arena-owned; valid until next evaluate)
     LayoutResult layout;
     std::vector<const detail::ViewNode*> nodes;
     std::unordered_map<Key, Callback> callbacks;
@@ -91,6 +141,18 @@ struct UI::Impl {
     Rect ime_text_bounds_{};  // last painted text extent, client pixels
     Key focused_key{};
     Key pressed_key{};
+
+    // 0.8: retained, value-type caches. They survive arena.reset() and drive
+    // per-level stage skipping plus per-Key command reuse.
+    std::vector<DrawCommand> commands{};
+    std::unordered_map<Key, NodeSnapshot> snapshots{};
+    std::uint64_t font_epoch = 0;
+    bool commands_dirty = true;
+    // Diagnostic counters, exposed via UI::frame_stats() for tests.
+    std::uint64_t evaluate_count = 0;
+    std::uint64_t solve_count = 0;
+    std::uint64_t command_generation_count = 0;
+    std::uint64_t glyph_shape_count = 0;
 
     void mark(const Invalidation level) noexcept {
         pending = merge_invalidation(pending, level);
@@ -129,6 +191,7 @@ struct UI::Impl {
         nodes.clear();
 
         const View root = build(arena, LocalState{&widget_states});
+        root_view = root;
         detail::ViewNode* root_node = detail::ViewTreeAccess::node(root);
         if (root_node == nullptr) {
             layout = LayoutResult{};
@@ -230,105 +293,192 @@ struct UI::Impl {
                        Constraints{0.0f, static_cast<float>(viewport.width),
                                    0.0f, static_cast<float>(viewport.height)},
                        *measurer);
+        ++evaluate_count;
+        ++solve_count;
     }
 
-    void paint(Painter& painter) {
+    // 0.8a: layout-only re-solve without rebuilding the view tree. root_view
+    // is still valid because the arena is only reset inside evaluate().
+    void solve_only() {
+        if (root_view.empty() || measurer == nullptr) {
+            return;
+        }
+        layout = solve(root_view,
+                       Constraints{0.0f, static_cast<float>(viewport.width),
+                                   0.0f, static_cast<float>(viewport.height)},
+                       *measurer);
+        ++solve_count;
+    }
+
+    // 0.8b: regenerate draw commands for one node into `out`. No arena
+    // pointers are stored — text runs and colors are value copies.
+    void generate_commands(const LayoutBox& box, const detail::ViewNode& node,
+                           const WidgetState* state, std::vector<DrawCommand>& out) {
+        if (box.bounds.empty()) {
+            return;
+        }
+        const Style& style = node.style;
+        const bool is_interactive = node.type == detail::ViewNode::Type::button
+                                    || node.type == detail::ViewNode::Type::input;
+        const bool focused = state != nullptr && is_interactive && state->focused;
+        if (focused) {
+            constexpr Color kFocus = Color::rgb(120, 170, 255);
+            constexpr float w = 2.0f;
+            const Rect b = box.bounds;
+            out.push_back({DrawKind::rect, {b.x - w, b.y - w, b.width + 2.0f * w, w},
+                           {}, kFocus, {}, {}});
+            out.push_back({DrawKind::rect, {b.x - w, b.bottom(), b.width + 2.0f * w, w},
+                           {}, kFocus, {}, {}});
+            out.push_back({DrawKind::rect, {b.x - w, b.y, w, b.height},
+                           {}, kFocus, {}, {}});
+            out.push_back({DrawKind::rect, {b.right(), b.y, w, b.height},
+                           {}, kFocus, {}, {}});
+        }
+        if (style.background.a > 0) {
+            out.push_back({DrawKind::rounded_rect, box.bounds,
+                           Radius::all(style.radius), style.background, {}, {}});
+        }
+        if (node.type != detail::ViewNode::Type::text && !is_interactive) {
+            return;
+        }
+        if (font == nullptr || node.text.empty() || style.foreground.a == 0) {
+            return;
+        }
+        const GlyphRun run = fallback_fonts.empty()
+                                 ? font->shape(node.text, style.font_size)
+                                 : shape_with_fallback(font, fallback_fonts,
+                                                       node.text, style.font_size);
+        ++glyph_shape_count;
+        const TextMetrics metrics = font->metrics(style.font_size);
+        const float text_height = metrics.ascent + metrics.descent;
+        const float x = box.content.x
+                        + std::max(0.0f, (box.content.width - run.width) * 0.5f);
+        const float y = box.content.y
+                        + std::max(0.0f, (box.content.height - text_height) * 0.5f)
+                        + metrics.ascent;
+        out.push_back({DrawKind::text, {}, {}, style.foreground, run, {x, y}});
+
+        if (node.type == detail::ViewNode::Type::input && focused && state != nullptr) {
+            const auto x_at_char = [&](const std::size_t char_index) {
+                float px = x;
+                const std::size_t count = std::min(char_index, run.glyphs.size());
+                for (std::size_t g = 0; g < count; ++g) {
+                    px += run.glyphs[g].advance;
+                }
+                return px;
+            };
+            const float top = y - metrics.ascent;
+            ime_text_bounds_ = Rect{x, top, run.width, text_height};
+            if (state->selection_start != state->selection_end) {
+                const float s0 = x_at_char(std::min(state->selection_start,
+                                                    state->selection_end));
+                const float s1 = x_at_char(std::max(state->selection_start,
+                                                    state->selection_end));
+                if (s1 > s0) {
+                    out.push_back({DrawKind::rect, {s0, top, s1 - s0, text_height}, {},
+                                   Color::rgba(80, 120, 200, 120), {}, {}});
+                }
+            }
+            float caret_x = x_at_char(state->caret);
+            if (state->composing && !state->composition.empty()) {
+                const GlyphRun preview = fallback_fonts.empty()
+                    ? font->shape(state->composition, style.font_size)
+                    : shape_with_fallback(font, fallback_fonts,
+                                          state->composition, style.font_size);
+                ++glyph_shape_count;
+                out.push_back({DrawKind::text, {}, {},
+                               Color::rgba(255, 255, 120, 255), preview, {caret_x, y}});
+                caret_x += preview.width;
+            }
+            const float caret_h = std::max(2.0f, text_height * 0.9f);
+            ime_caret_ = Rect{caret_x, top, 1.5f, caret_h};
+            out.push_back({DrawKind::rect, ime_caret_, {},
+                           style.foreground, {}, {}});
+        }
+    }
+
+    // 0.8a/0.8b: build/reuse commands, then replay them into the frame's
+    // Painter. Only nodes whose visual signature changed regenerate commands.
+    void build_commands() {
+        commands.clear();
         ime_caret_ = Rect{};
         ime_text_bounds_ = Rect{};
+        // Reclaim snapshots of nodes that disappeared this frame (0.8 audit
+        // F2): without this, churning keys would grow the glyph cache forever.
+        std::unordered_set<Key> alive;
+        alive.reserve(nodes.size());
+        for (const detail::ViewNode* node : nodes) {
+            alive.insert(node->key);
+        }
+        for (auto it = snapshots.begin(); it != snapshots.end();) {
+            if (alive.find(it->first) == alive.end()) {
+                it = snapshots.erase(it);
+            } else {
+                ++it;
+            }
+        }
         for (std::size_t i = 0; i < layout.boxes.size() && i < nodes.size(); ++i) {
             const LayoutBox& box = layout.boxes[i];
             const detail::ViewNode& node = *nodes[i];
-            if (box.bounds.empty()) {
-                continue;
-            }
-            const Style& style = node.style;
-            const bool is_interactive = node.type == detail::ViewNode::Type::button
-                                        || node.type == detail::ViewNode::Type::input;
             const auto it = widget_states.find(node.key);
-            const bool focused = is_interactive && it != widget_states.end()
-                                 && it->second.focused;
-            if (focused) {
-                // Minimal, hardcoded focus feedback (library-first: no style
-                // API). Four thin rects form a border that is visible for both
-                // opaque and transparent backgrounds — a single enlarged filled
-                // rect would look like a solid block when background.a == 0.
-                constexpr Color kFocus = Color::rgb(120, 170, 255);
-                constexpr float w = 2.0f;
-                const Rect b = box.bounds;
-                painter.rect({b.x - w, b.y - w, b.width + 2.0f * w, w},
-                             Paint{kFocus});
-                painter.rect({b.x - w, b.bottom(), b.width + 2.0f * w, w},
-                             Paint{kFocus});
-                painter.rect({b.x - w, b.y, w, b.height}, Paint{kFocus});
-                painter.rect({b.right(), b.y, w, b.height}, Paint{kFocus});
+            const WidgetState* state = it == widget_states.end() ? nullptr : &it->second;
+            NodeVisual visual;
+            visual.style = node.style;
+            visual.text = node.text;
+            visual.bounds = box.bounds;
+            visual.content = box.content;
+            visual.type = static_cast<std::uint8_t>(node.type);
+            visual.font_epoch = font_epoch;
+            if (state != nullptr) {
+                visual.focused = state->focused;
+                visual.composing = state->composing;
+                visual.composition = state->composition;
+                visual.caret = state->caret;
+                visual.selection_start = state->selection_start;
+                visual.selection_end = state->selection_end;
             }
-            if (style.background.a > 0) {
-                painter.rounded_rect(box.bounds, Radius::all(style.radius),
-                                     Paint{style.background});
-            }
-            if (node.type != detail::ViewNode::Type::text && !is_interactive) {
-                continue;
-            }
-            if (font == nullptr || node.text.empty() || style.foreground.a == 0) {
-                continue;
-            }
-            const GlyphRun run = fallback_fonts.empty()
-                                     ? font->shape(node.text, style.font_size)
-                                     : shape_with_fallback(font, fallback_fonts,
-                                                           node.text, style.font_size);
-            const TextMetrics metrics = font->metrics(style.font_size);
-            const float text_height = metrics.ascent + metrics.descent;
-            const float x = box.content.x
-                            + std::max(0.0f, (box.content.width - run.width) * 0.5f);
-            const float y = box.content.y
-                            + std::max(0.0f, (box.content.height - text_height) * 0.5f)
-                            + metrics.ascent;
-            painter.text(run, {x, y}, Paint{style.foreground});
 
-            if (node.type == detail::ViewNode::Type::input && focused
-                && it != widget_states.end()) {
-                // Map a character index to an x offset using the advances of
-                // the very run we just painted (0.7 audit F4).
-                const auto x_at_char = [&](const std::size_t char_index) {
-                    float px = x;
-                    const std::size_t count = std::min(char_index, run.glyphs.size());
-                    for (std::size_t g = 0; g < count; ++g) {
-                        px += run.glyphs[g].advance;
-                    }
-                    return px;
-                };
-                const WidgetState& input_state = it->second;
-                const float top = y - metrics.ascent;
-                ime_text_bounds_ = Rect{x, top, run.width, text_height};
-                if (input_state.selection_start != input_state.selection_end) {
-                    const float s0 = x_at_char(std::min(input_state.selection_start,
-                                                        input_state.selection_end));
-                    const float s1 = x_at_char(std::max(input_state.selection_start,
-                                                        input_state.selection_end));
-                    if (s1 > s0) {
-                        painter.rect({s0, top, s1 - s0, text_height},
-                                     Paint{Color::rgba(80, 120, 200, 120)});
-                    }
+            const auto cached = snapshots.find(node.key);
+            if (cached != snapshots.end()
+                && cached->second.visual.same_as(visual)) {
+                // Reuse: append cached commands, restore IME geometry.
+                commands.insert(commands.end(), cached->second.commands.begin(),
+                                cached->second.commands.end());
+                if (visual.focused && visual.type
+                        == static_cast<std::uint8_t>(detail::ViewNode::Type::input)) {
+                    ime_caret_ = cached->second.ime_caret;
+                    ime_text_bounds_ = cached->second.ime_text_bounds;
                 }
-                // The composition preview occupies space at the caret, so the
-                // visible caret moves to the END of the preview while composing
-                // (architecture §8.3 caret sync). The candidate window anchors
-                // to that same advanced position.
-                float caret_x = x_at_char(input_state.caret);
-                if (input_state.composing && !input_state.composition.empty()) {
-                    const GlyphRun preview =
-                        fallback_fonts.empty()
-                            ? font->shape(input_state.composition, style.font_size)
-                            : shape_with_fallback(font, fallback_fonts,
-                                                  input_state.composition,
-                                                  style.font_size);
-                    painter.text(preview, {caret_x, y},
-                                 Paint{Color::rgba(255, 255, 120, 255)});
-                    caret_x += preview.width;
-                }
-                const float caret_h = std::max(2.0f, text_height * 0.9f);
-                ime_caret_ = Rect{caret_x, top, 1.5f, caret_h};
-                painter.rect(ime_caret_, Paint{style.foreground});
+                continue;
+            }
+
+            // Changed node: regenerate its commands and cache them by Key.
+            const std::size_t begin = commands.size();
+            generate_commands(box, node, state, commands);
+            ++command_generation_count;
+            NodeSnapshot snapshot;
+            snapshot.visual = visual;
+            snapshot.commands.assign(commands.begin() + static_cast<std::ptrdiff_t>(begin),
+                                     commands.end());
+            snapshot.ime_caret = ime_caret_;
+            snapshot.ime_text_bounds = ime_text_bounds_;
+            snapshots[node.key] = std::move(snapshot);
+        }
+        commands_dirty = false;
+    }
+
+    void replay(Painter& painter) {
+        for (const DrawCommand& cmd : commands) {
+            switch (cmd.kind) {
+                case DrawKind::rect:
+                    painter.rect(cmd.bounds, Paint{cmd.color});
+                    break;
+                case DrawKind::rounded_rect:
+                    painter.rounded_rect(cmd.bounds, cmd.radius, Paint{cmd.color});
+                    break;
+                case DrawKind::text:
+                    painter.text(cmd.run, cmd.origin, Paint{cmd.color});
+                    break;
             }
         }
     }
@@ -351,7 +501,8 @@ struct UI::Impl {
                 it->second.focused = true;
             }
         }
-        mark(Invalidation::paint);
+        // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+        mark(Invalidation::view);
     }
 
     void move_focus(const int direction) noexcept {
@@ -456,7 +607,8 @@ struct UI::Impl {
         }
         state->selection_start = state->caret;
         state->selection_end = state->caret;
-        mark(Invalidation::paint);
+        // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+        mark(Invalidation::view);
     }
 
     [[nodiscard]] Key hit_key(const Event& event) const noexcept {
@@ -482,7 +634,8 @@ struct UI::Impl {
                     }
                 }
                 if (changed) {
-                    mark(Invalidation::paint);
+                    // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+                    mark(Invalidation::view);
                 }
                 return changed;
             }
@@ -528,7 +681,8 @@ struct UI::Impl {
                         return true;
                     }
                 }
-                mark(Invalidation::paint);
+                // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+                mark(Invalidation::view);
                 return false;
             }
             case EventType::key_down: {
@@ -569,7 +723,8 @@ struct UI::Impl {
                 }
                 state->composing = true;
                 state->composition.clear();
-                mark(Invalidation::paint);
+                // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+                mark(Invalidation::view);
                 return true;
             }
             case EventType::composition_update: {
@@ -578,7 +733,8 @@ struct UI::Impl {
                     return false;
                 }
                 state->composition = event.text;
-                mark(Invalidation::paint);
+                // LocalState feeds ViewFn; C3 forbids implicit tracking, so re-evaluate.
+                mark(Invalidation::view);
                 return true;
             }
             case EventType::composition_end: {
@@ -614,7 +770,7 @@ Invalidation UI::pending() const noexcept { return impl_->pending; }
 void UI::set_font(const FontFace* face) {
     impl_->font = face;
     impl_->measurer = std::make_unique<FaceMeasurer>(face, impl_->fallback_fonts);
-    // A different face changes text measurement -> geometry.
+    ++impl_->font_epoch;  // invalidates cached text runs / glyph geometry
     impl_->mark(Invalidation::layout);
 }
 
@@ -622,11 +778,13 @@ void UI::set_fallback_fonts(const std::span<const FontFace* const> faces) {
     impl_->fallback_fonts.assign(faces.begin(), faces.end());
     impl_->measurer = std::make_unique<FaceMeasurer>(impl_->font,
                                                      impl_->fallback_fonts);
+    ++impl_->font_epoch;
     impl_->mark(Invalidation::layout);
 }
 
 void UI::set_text_measurer(std::unique_ptr<TextMeasurer> measurer) {
     impl_->measurer = std::move(measurer);
+    ++impl_->font_epoch;
     impl_->mark(Invalidation::layout);
 }
 
@@ -635,16 +793,41 @@ void UI::paint(Painter& painter, const Size viewport) {
         impl_->mark(Invalidation::layout);
         impl_->viewport = viewport;
     }
-    if (impl_->pending != Invalidation::none) {
-        impl_->evaluate();
+    // 0.8a: the invalidation level decides which stages run. Counts reset each
+    // frame so frame_stats() reports work done by THIS paint() call.
+    impl_->evaluate_count = 0;
+    impl_->solve_count = 0;
+    impl_->command_generation_count = 0;
+    impl_->glyph_shape_count = 0;
+    const Invalidation level = impl_->pending;
+    if (level == Invalidation::full) {
+        // Full forces every stage including discarding possibly-stale caches.
+        impl_->snapshots.clear();
     }
+    if (at_least(level, Invalidation::view)) {
+        impl_->evaluate();               // build + solve; arena reset here
+        impl_->commands_dirty = true;
+    } else if (at_least(level, Invalidation::layout)) {
+        impl_->solve_only();             // re-solve existing tree, no rebuild
+        impl_->commands_dirty = true;
+    }
+    // paint / none: reuse last frame's layout; commands may still be rebuilt
+    // if a widget's visual signature changed (e.g. focus/caret).
     impl_->pending = Invalidation::none;
-    impl_->paint(painter);
+    if (impl_->commands_dirty || level == Invalidation::paint) {
+        impl_->build_commands();
+    }
+    impl_->replay(painter);
 }
 
 bool UI::handle_event(const Event& event) { return impl_->handle_event(event); }
 
 const LayoutResult& UI::layout() const noexcept { return impl_->layout; }
+
+FrameStats UI::frame_stats() const noexcept {
+    return FrameStats{impl_->evaluate_count, impl_->solve_count,
+                      impl_->command_generation_count, impl_->glyph_shape_count};
+}
 
 ImeContext UI::ime_context() const noexcept {
     ImeContext context;

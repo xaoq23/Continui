@@ -54,7 +54,7 @@ render 把"绘制意图"变成 GPU 可消费的 CPU 数据：`Painter` 是公共
 2. 文本 quad 像素尺寸来自 `width_px/height_px`，**不得**从归一化 uv 推导
 3. batcher 输出的 tint 始终预乘；backend 的 blend 假设 One/OneMinusSrcAlpha
 4. UI 的 callback registry 只存 arena 之外的 std::function 副本；节点指针不出帧
-5. 任何非 none 失效都整树重算（0.6 简化）；`paint` 后 pending == none
+5. 0.8 起按失效等级调度：`none` 不重算、`layout` 只重求解、`view` 重建+求解；`paint` 后 pending == none
 
 ## 错误/边界处理
 
@@ -62,7 +62,7 @@ render 把"绘制意图"变成 GPU 可消费的 CPU 数据：`Painter` 是公共
 
 ## 已知限制
 
-- UI 未做 Tree Diff / 脏区分级（Phase 0.8），无效失效也会整树重算
+- 0.8 用按 Key 值类型快照（实用版 Tree Diff）复用未变节点的绘制命令，但不做 GPU 脏矩形合成（架构 §7.4 允许整窗口重绘）；跨帧 retained ViewNode 树仍未实现
 - 按钮/输入框的 hover/pressed/focus 由 LocalState 提供（`ui.cpp`、0.7）；聚焦反馈由库硬编码为最小亮蓝边框（无样式 API，遵循"先只做 HTML、样式留到后续层"的决策），用四条细矩形绘制，透明/不透明背景均可见；composition 预览期间 caret 移到预览串末尾；caret 支持任意字符位置与选区矩形
 - uint16 索引上限 16384 quads/帧（0.4 已知限制，文本密集帧也要注意）
 - `TextRasterContext::atlas_texture()` 每 glyph 查询一次（增长时换 id 的代价）
