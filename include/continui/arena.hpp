@@ -111,12 +111,11 @@ private:
                                      & ~(static_cast<std::uintptr_t>(alignment) - 1)) - base;
         block.used = offset + bytes;
         void* result = block.data.get() + offset;
-        if (current_ == blocks_.size()) {
-            blocks_.push_back(std::move(block));
-        } else {
-            blocks_[current_] = std::move(block);  // grow an undersized block
-        }
-        ++current_;
+        // Never replace an occupied block: it still holds live objects and
+        // their registered destructor entries. Append a fresh block and
+        // make it current instead (the old block stays untouched).
+        current_ = blocks_.size();
+        blocks_.push_back(std::move(block));
         return result;
     }
 

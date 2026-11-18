@@ -9,6 +9,7 @@
 #include <cmath>
 #include <print>
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace {
@@ -52,6 +53,32 @@ void test_arena() {
     arena.create<int>(7);
     arena.reset();
     check(arena.allocations() == 0, "reset clears allocation bookkeeping");
+}
+
+void test_arena_growth_across_frames() {
+    using namespace continui;
+    FrameArena arena;
+    // 400 non-trivial objects (>4 KiB) force multiple blocks; rebuilding the
+    // same workload for 4 frames exercises the "current block too small"
+    // path with LIVE objects still in older blocks (0.6 audit CRITICAL:
+    // replacing an occupied block caused a use-after-free in frame 2).
+    for (int frame = 0; frame < 4; ++frame) {
+        arena.reset();
+        std::vector<std::string*> strings;
+        strings.reserve(400);
+        for (int i = 0; i < 400; ++i) {
+            strings.push_back(arena.create<std::string>(
+                std::string(48, static_cast<char>('a' + (i % 26)))));
+        }
+        bool intact = true;
+        for (int i = 0; i < 400; ++i) {
+            intact = intact && strings[i]->size() == 48
+                     && (*strings[i])[0] == static_cast<char>('a' + (i % 26));
+        }
+        check(intact, "arena objects survive multi-frame block growth");
+    }
+    arena.reset();
+    check(arena.allocations() == 0, "multi-frame arena resets cleanly");
 }
 
 void test_solver() {
@@ -184,6 +211,7 @@ void test_invalidation() {
 
 int main() {
     test_arena();
+    test_arena_growth_across_frames();
     test_solver();
     test_invalidation();
     if (failures == 0) {

@@ -51,8 +51,9 @@ public:
 [[nodiscard]] LayoutResult solve(const View& root, const Constraints& constraints,
                                  const TextMeasurer& measurer);
 
-// Deepest box whose bounds contain the point (pixels, y-down). Buttons are
-// preferred at equal depth so overlapping decorations do not steal hits.
+// Deepest box whose bounds contain the point (pixels, y-down). Preorder
+// guarantees descendants are visited after ancestors, so the last match wins.
+// Bounds are inclusive; equal-depth overlapping boxes have no priority rule.
 [[nodiscard]] std::optional<std::uint32_t> hit_test(const LayoutResult& result,
                                                      PointF point);
 
