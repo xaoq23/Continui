@@ -104,6 +104,29 @@
 - **独立 review 结论：Accept after corrections**——bug 注入实验确认测试有效性：把 `dawn_renderer.cpp` 的 baseVertex 改回 `batch.vertex_offset` 后断言 (2) 3/3 失败；把 `batcher.cpp` 的 quad 尺寸改回归一化 UV 后断言 (3) 3/3 失败；还原后基线全过。20/20 连续运行无 flake。修正 2 个 MINOR（早退分支不 `quit()`、文件头注释更新）后重跑 clang 7/7。
 - **覆盖限制 [INFO]**：`default`（MSVC）preset 未开启 `CONTINUI_BUILD_BACKEND_DAWN`，backend 测试仅在 `clang` preset 注册；像素回读断言目前只有 clang 背书。GDI 读回是 Win32 API，编译器差异影响有限；如需 MSVC 背书需单独配置 DAWN ON 的 MSVC 构建。
 
+### B 阶段：0.7 交互 + TSF IME + fallback（实现完成，独立审计中）
+
+- **范围**：LocalState（按 Key 持有 hover/pressed/focused、文本 caret/selection、IME composition）、`ViewFn` 签名改为 `View(FrameArena&, const LocalState&)`、`Input` 组合子、鼠标/键盘/文本编辑事件路由、TSF IME、字体 fallback 链。
+- **IME 技术决策**：Windows 用 TSF（业主决策，遵循架构 §8.3 / ADR-015，未用 Imm32）。`ime_tsf.cpp` 实现 `ITextStoreACP` + `ITfContextOwnerCompositionSink`，composition 作为独立事件下发，不转成普通按键。
+- **SDK 缺口**：本机 Windows SDK 有 `msctf.dll` 但无 `msctf.lib`；本地以 `constexpr kIidTfContextOwnerCompositionSink` / `kIidTfContextOwnerServices`（内部链接，避免与 `uuid`/`dxguid` 冲突）定义所需 IID，用 `GetProcAddress` 动态加载 `TF_CreateThreadMgr`。
+- **fallback**：`Glyph` 携带 face 指针，`shape_with_fallback` 逐 codepoint 选择首个覆盖该字符的 face；逐字符 shaping 不产生连字/kerning（已知限制）。
+- **验证**：clang 7/7、MSVC 6/6，无编译警告；`ui_test` 覆盖 LocalState/焦点/文本编辑/composition 事件，`text_test` 覆盖 segoeui→msyh 的 fallback face 选择；Counter 例子加入输入框与中文字体 fallback。真实中文 IME 需手工验收（无法自动化）。
+- **独立审计结论：FAIL（BLOCKED，5 MAJOR + 5 MINOR + 3 INFO）→ 全部修正 → 待复核**。关键发现与修复：
+  - [MAJOR F1] TSF 从未 `Push` context → IME 路径完全失效。已加 `doc_mgr->Push/Pop`，使 `AdviseSink` 被调用、锁可被授予。
+  - [MAJOR F2] 编辑读取帧陈旧 arena 节点 → 连续输入丢字符（复现 `A`+`B`→`B`）。`WidgetState::edited_text` 成为事件间权威缓冲。
+  - [MAJOR F3] 前向删除无效、backspace 后 caret 错位。改为直接从当前 caret/选区算删除范围，caret 用字符索引。
+  - [MAJOR F4] caret/selection 存了但不按位置渲染。改为从实际字形 advance 计算 caret x 并绘制选区矩形。
+  - [MAJOR F5] 候选窗定位/文本同步缺失。`UI::ime_context()` → `Window::set_ime_context()` → `TsfInputContext::sync_state()` 显式连接；`GetTextExt`/`GetACPFromPoint`/`GetScreenExt` 改用真实 caret/文本。
+  - [MINOR] COM 初始化平衡、advise sink AddRef/Release、teardown 顺序、双重 commit、UTF-16 surrogate、本地 IID 命名、文档与测试覆盖均已修正。
+  - 新增 `ui_test::test_editing_regressions`（连续输入/前向删除/删除后插入），clang 7/7、MSVC 6/6。真实 IME 仍需手工验收。
+- **第二轮复核：FAIL（2 MAJOR + 3 MINOR）→ 已修正**。F1–F4/F6–F8/F10–F12 经原复现程序与代码证据确认修复；剩余：
+  - [MAJOR N1] TSF 坐标空间不匹配：`GetTextExt` 返回 client 坐标（API 要求 screen）、`GetACPFromPoint` 用 screen 点比 client 矩形。已改为 `ClientToScreen`/`ScreenToClient`，fallback 用 `GetWindowRect`。
+  - [MAJOR F9] 双重 commit 守卫无效：UI 的 `composition_end` 用 `state->composition` 而非 `event.text`，TSF 空 payload 守卫失效。已改为提交 `event.text`（空则不插入），并加"text_input + 空 composition_end 只插入一次"回归测试。
+  - [MINOR N2] `GetTextExt` 返回 1.5px 竖线、selection 每帧被重置 → 改为返回完整文本范围，仅文本变化时重置 selection。
+  - [MINOR N3] `WM_CHAR` surrogate 缓存是函数级 static → 移入 `WindowImpl`（每窗口独立）。
+  - [MINOR N4] 文档不一致 → 已修正。
+  - **第三轮复核结论：Accept**——审计员强制重编译两工具链（clang 7/7、MSVC 6/6，无警告），并用真实 pre-fix `ui.cpp` 对照程序证明 F9 回归测试能抓到双重提交（修复后 `"Hi中Z"`、pre-fix `"Hi中Z预"`）。N1 的 `ClientToScreen`/`ScreenToClient` 方向经 MSDN API 契约核对正确。无阻塞代码发现；真实中文 IME 仍需手工验收（环境无法自动化 TIP 驱动）。
+
 ## 3. 已知问题登记（未修，但已记录）
 
 | 问题 | 影响 | 归属阶段 | 代码位置 |
@@ -112,7 +135,8 @@
 | 无 Tree Diff / 脏区分级；任何失效整树重算 | 性能问题，不是正确性问题 | 0.8 | `ui.cpp:152` |
 | 事件使用上一帧布局 | resize 当帧的点击仍命中旧几何（resize 已在 paint 时触发重算，但事件先于 paint 泵出） | 0.8 / 输入阶段 | `ui.cpp:164` |
 | 字体路径仅 ASCII；TTC 取 face 0 | Unicode 路径/字体集合受限 | 后续平台阶段 | `font_manager.cpp:101` |
-| 图集无淘汰，上限 2048；无 fallback 链 | 大字数/多语言缺字 | 0.7+ | `glyph_cache.cpp:110` |
+| 图集无淘汰，上限 2048 | 大字数多语言时图集可能封顶 | 0.7+ | `glyph_cache.cpp:110` |
+| fallback 逐字符 shaping，无连字/kerning | 混排文本的字距/连写不精确 | 0.7+ | `font_manager.cpp::shape_with_fallback` |
 | uint16 索引上限 16384 quads/帧，超出静默丢弃 | 文本密集帧可能丢字 | 后续（u32 索引） | `batcher.cpp:70` |
 | HWND 复用 / display-mode 变化 stale surface | 多窗口/DPI 阶段处理 | 后续 | `dawn_renderer.cpp:853` |
 

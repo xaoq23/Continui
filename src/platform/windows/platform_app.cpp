@@ -40,6 +40,8 @@ bool register_window_class(HINSTANCE instance) {
 
 void destroy_all_windows(AppImpl& app) {
     for (auto& window : app.windows) {
+        // Tear down TSF before the HWND it is associated with (0.7 audit F8).
+        window->tsf.reset();
         if (window->hwnd != nullptr) {
             DestroyWindow(window->hwnd);
         }
@@ -135,7 +137,15 @@ std::expected<Window, WindowError> App::create_window(const WindowDesc& desc) {
     }
 
     impl_->windows.push_back(std::move(impl));
-    return Window{impl_->windows.back().get()};
+    detail::WindowImpl* window = impl_->windows.back().get();
+    // TSF needs the stable final pointer, so initialise after the move.
+    window->tsf = std::make_unique<detail::TsfInputContext>(
+        window->hwnd, [window](const Event& event) {
+            if (window->handler) {
+                window->handler(event);
+            }
+        });
+    return Window{window};
 }
 
 int App::run() {

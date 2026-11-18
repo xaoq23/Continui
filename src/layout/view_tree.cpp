@@ -9,13 +9,14 @@ using continui::detail::ViewNode;
 
 View make(FrameArena& arena, ViewNode::Type type, Key key, Style style,
           std::initializer_list<View> children, std::string_view text,
-          Callback callback) {
+          Callback callback, TextCallback text_callback = {}) {
     ViewNode* node = arena.create<ViewNode>();
     node->type = type;
     node->key = key;
     node->style = style;
     node->text = std::string(text);
     node->callback = std::move(callback);
+    node->text_callback = std::move(text_callback);
     node->child_count = static_cast<std::uint32_t>(children.size());
     if (children.size() > 0) {
         node->children = arena.allocate_array<ViewNode*>(children.size());
@@ -46,6 +47,10 @@ View Button(FrameArena& arena, std::string_view label, Callback callback, Style 
     return make(arena, ViewNode::Type::button, auto_key(arena), style, {}, label,
                 std::move(callback));
 }
+View Input(FrameArena& arena, std::string_view text, TextCallback on_change, Style style) {
+    return make(arena, ViewNode::Type::input, auto_key(arena), style, {}, text, {},
+                std::move(on_change));
+}
 View Solid(FrameArena& arena, Style style) {
     return make(arena, ViewNode::Type::rect, auto_key(arena), style, {}, {}, {});
 }
@@ -62,6 +67,11 @@ View Text(FrameArena& arena, Key key, std::string_view content, Style style) {
 View Button(FrameArena& arena, Key key, std::string_view label, Callback callback,
             Style style) {
     return make(arena, ViewNode::Type::button, key, style, {}, label, std::move(callback));
+}
+View Input(FrameArena& arena, Key key, std::string_view text, TextCallback on_change,
+           Style style) {
+    return make(arena, ViewNode::Type::input, key, style, {}, text, {},
+                std::move(on_change));
 }
 View Solid(FrameArena& arena, Key key, Style style) {
     return make(arena, ViewNode::Type::rect, key, style, {}, {}, {});

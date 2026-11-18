@@ -12,6 +12,7 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -52,6 +53,10 @@ public:
     [[nodiscard]] std::string_view family() const noexcept;
     [[nodiscard]] FontWeight weight() const noexcept;
 
+    // True when the face's cmap maps the codepoint to a real glyph rather
+    // than .notdef. Used by the fallback chain (0.7).
+    [[nodiscard]] bool covers(char32_t codepoint) const noexcept;
+
 private:
     friend class FontManager;
     friend class detail::GlyphCache;  // rasterizes cached glyphs via FaceImpl
@@ -86,5 +91,12 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Shapes UTF-8 with per-codepoint font fallback (0.7): `primary` is tried
+// first, then `fallbacks` in order. Each glyph remembers the face that drew
+// it; a codepoint missing everywhere falls back to primary's .notdef.
+[[nodiscard]] GlyphRun shape_with_fallback(
+    const FontFace* primary, std::span<const FontFace* const> fallbacks,
+    std::string_view utf8, float size_px);
 
 }  // namespace continui

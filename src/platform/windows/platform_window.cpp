@@ -83,6 +83,26 @@ bool is_button_down_message(UINT message) {
     }
 }
 
+std::string utf8_encode_codepoint(std::uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+    return out;
+}
+
 void deliver(WindowImpl& window, const Event& event) {
     if (window.handler) {
         window.handler(event);
@@ -110,7 +130,8 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM w_param, LPARA
 
     switch (message) {
         case WM_CLOSE:
-            deliver(*impl, Event{.type = EventType::window_close_requested});
+            deliver(*impl, Event{.type = EventType::window_close_requested,
+                                 .text = {}});
             DestroyWindow(hwnd);
             return 0;
 
@@ -122,11 +143,51 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM w_param, LPARA
 
         case WM_SIZE:
             if (w_param != SIZE_MINIMIZED) {
-                Event event{.type = EventType::window_resized};
+                Event event{.type = EventType::window_resized, .text = {}};
                 event.size = Size{static_cast<int>(LOWORD(l_param)), static_cast<int>(HIWORD(l_param))};
                 deliver(*impl, event);
             }
             return 0;
+
+        case WM_SETFOCUS:
+            if (impl->tsf) {
+                impl->tsf->on_focus(true);
+            }
+            return 0;
+
+        case WM_KILLFOCUS:
+            if (impl->tsf) {
+                impl->tsf->on_focus(false);
+            }
+            return 0;
+
+        case WM_CHAR: {
+            // Plain characters arrive here; IME composition is handled by TSF
+            // and must NOT be converted into key events (architecture §8.3).
+            if (w_param == VK_BACK || w_param == VK_TAB
+                || w_param == VK_RETURN || w_param == VK_ESCAPE) {
+                break;
+            }
+            const wchar_t ch = static_cast<wchar_t>(w_param);
+            std::uint32_t codepoint = static_cast<std::uint32_t>(ch);
+            // WM_CHAR delivers UTF-16 surrogate pairs as two messages; buffer
+            // a high surrogate so non-BMP codepoints form valid UTF-8 (F10).
+            if (impl->pending_high_surrogate != 0) {
+                if (ch >= 0xDC00 && ch <= 0xDFFF) {
+                    codepoint = 0x10000u
+                                + ((impl->pending_high_surrogate - 0xD800u) << 10)
+                                + static_cast<std::uint32_t>(ch - 0xDC00u);
+                }
+                impl->pending_high_surrogate = 0;
+            } else if (ch >= 0xD800 && ch <= 0xDBFF) {
+                impl->pending_high_surrogate = static_cast<std::uint32_t>(ch);
+                return 0;
+            }
+            Event event{.type = EventType::text_input, .text = {}};
+            event.text = utf8_encode_codepoint(codepoint);
+            deliver(*impl, event);
+            return 0;
+        }
 
         case WM_PAINT: {
             PAINTSTRUCT paint{};
@@ -155,7 +216,7 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM w_param, LPARA
         }
 
         case WM_MOUSEMOVE: {
-            Event event{.type = EventType::mouse_move};
+            Event event{.type = EventType::mouse_move, .text = {}};
             event.position = client_position(l_param);
             event.modifiers = modifiers_now();
             deliver(*impl, event);
@@ -198,6 +259,13 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM w_param, LPARA
 void Window::set_event_handler(EventHandler handler) {
     if (impl_ != nullptr) {
         impl_->handler = std::move(handler);
+    }
+}
+
+void Window::set_ime_context(const std::string_view text, const Rect caret,
+                             const Rect text_bounds) {
+    if (impl_ != nullptr && impl_->tsf != nullptr) {
+        impl_->tsf->sync_state(text, caret, text_bounds);
     }
 }
 

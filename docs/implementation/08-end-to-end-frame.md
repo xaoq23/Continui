@@ -76,7 +76,7 @@ View = build(arena)  ──► ViewNode 树（arena 内，本帧有效）
 - 没有 Key 匹配/diff：即使只有 count 变化，整棵树也重建
 - 没有布局脏区：所有节点重算几何
 - 没有绘制脏区：renderer 每帧全屏 clear + 重画
-- 没有键盘输入/焦点/IME：Counter 只能用鼠标；Escape 由事件处理器直接 `app->quit()`
+- 键盘输入/焦点/IME 已接入（0.7）：Tab 移焦点、Enter/Space 激活按钮、`WM_CHAR` 文本输入、TSF composition 事件；Escape 仍由事件处理器直接 `app->quit()`
 
 ## 调试入口
 

@@ -18,6 +18,10 @@ const char* event_type_name(continui::EventType type) {
         case ET::key_up: return "key_up";
         case ET::mouse_button_down: return "button_down";
         case ET::mouse_button_up: return "button_up";
+        case ET::text_input: return "text_input";
+        case ET::composition_start: return "composition_start";
+        case ET::composition_update: return "composition_update";
+        case ET::composition_end: return "composition_end";
         case ET::mouse_move: return "mouse_move";
     }
     return "unknown";

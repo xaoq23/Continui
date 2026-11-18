@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 namespace continui {
 
@@ -19,6 +20,10 @@ enum class EventType : std::uint8_t {
     mouse_move,
     mouse_button_down,
     mouse_button_up,
+    text_input,           // committed characters (WM_CHAR / TSF commit)
+    composition_start,    // IME composition begins
+    composition_update,   // IME preview string changed (not a key event)
+    composition_end,      // IME composition committed/cancelled
 };
 
 // Draft keyboard codes: platform values (VK_*) are translated before they
@@ -82,6 +87,7 @@ struct Event {
     MouseButton button{};   // mouse_button_down / mouse_button_up
     Point position{};       // mouse events: client-area pixels
     Size size{};            // window_resized: new client size
+    std::string text;       // text_input / composition_*: UTF-8 payload
 };
 
 using EventHandler = std::function<void(const Event&)>;

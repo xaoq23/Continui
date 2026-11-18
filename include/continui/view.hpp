@@ -22,6 +22,9 @@ struct ViewTreeAccess;  // internal bridge for solver/orchestration
 }
 
 using Callback = std::function<void()>;
+// Text Input reports the edited UTF-8 string back to the user; the user owns
+// the business text and updates State inside this callback.
+using TextCallback = std::function<void(std::string_view)>;
 
 class View {
 public:
@@ -37,11 +40,13 @@ private:
     friend View Column(FrameArena&, std::initializer_list<View>, Style);
     friend View Text(FrameArena&, std::string_view, Style);
     friend View Button(FrameArena&, std::string_view, Callback, Style);
+    friend View Input(FrameArena&, std::string_view, TextCallback, Style);
     friend View Solid(FrameArena&, Style);
     friend View Row(FrameArena&, Key, std::initializer_list<View>, Style);
     friend View Column(FrameArena&, Key, std::initializer_list<View>, Style);
     friend View Text(FrameArena&, Key, std::string_view, Style);
     friend View Button(FrameArena&, Key, std::string_view, Callback, Style);
+    friend View Input(FrameArena&, Key, std::string_view, TextCallback, Style);
     friend View Solid(FrameArena&, Key, Style);
 
     explicit View(detail::ViewNode* node) noexcept : node_(node) {}
@@ -55,12 +60,18 @@ View Row(FrameArena& arena, std::initializer_list<View> children, Style style = 
 View Column(FrameArena& arena, std::initializer_list<View> children, Style style = {});
 View Text(FrameArena& arena, std::string_view content, Style style = {});
 View Button(FrameArena& arena, std::string_view label, Callback callback, Style style = {});
+// Single-line text input. `text` is the current value from user state;
+// `on_change` is called with the edited value when keyboard/IME input occurs.
+View Input(FrameArena& arena, std::string_view text, TextCallback on_change,
+           Style style = {});
 View Solid(FrameArena& arena, Style style = {});
 
 View Row(FrameArena& arena, Key key, std::initializer_list<View> children, Style style = {});
 View Column(FrameArena& arena, Key key, std::initializer_list<View> children, Style style = {});
 View Text(FrameArena& arena, Key key, std::string_view content, Style style = {});
 View Button(FrameArena& arena, Key key, std::string_view label, Callback callback, Style style = {});
+View Input(FrameArena& arena, Key key, std::string_view text, TextCallback on_change,
+           Style style = {});
 View Solid(FrameArena& arena, Key key, Style style = {});
 
 }  // namespace continui

@@ -12,17 +12,32 @@
 #include <continui/events.hpp>
 #include <continui/invalidation.hpp>
 #include <continui/layout.hpp>
+#include <continui/local_state.hpp>
 #include <continui/painter.hpp>
 #include <continui/view.hpp>
 
 #include <functional>
 #include <memory>
+#include <span>
+#include <string>
 
 namespace continui {
 
+// Readback for the platform's IME: the focused input's current text and the
+// caret rectangle in client pixels. The user connects UI -> Window explicitly
+// (library-first); no hidden coupling (architecture §8.3, audit F5).
+struct ImeContext {
+    std::string text{};
+    Rect caret{};        // caret line, client pixels
+    Rect text_bounds{};  // full text extent, client pixels (candidate anchor)
+};
+
 class UI {
 public:
-    using ViewFn = std::function<View(FrameArena&)>;
+    // The view is a pure projection of user State plus read-only LocalState
+    // (hover/pressed/focused, text caret/selection, IME composition). Events
+    // mutate LocalState and user State, then invalidate explicitly (C3).
+    using ViewFn = std::function<View(FrameArena&, const LocalState&)>;
 
     explicit UI(ViewFn build);
     ~UI();
@@ -40,6 +55,10 @@ public:
     // outlive this UI. Without a font, text nodes paint as empty boxes and
     // measure zero (layout still works).
     void set_font(const FontFace* face);
+    // Optional per-codepoint font fallback chain (0.7). Faces are tried in
+    // order when the primary face from set_font() does not cover a codepoint.
+    // All faces must outlive this UI.
+    void set_fallback_fonts(std::span<const FontFace* const> faces);
     // Custom measurement (tests, headless tooling). Replaces the font-based
     // measurer.
     void set_text_measurer(std::unique_ptr<TextMeasurer> measurer);
@@ -49,11 +68,16 @@ public:
     // constrains the root box (client-area pixels).
     void paint(Painter& painter, Size viewport);
 
-    // Called from the window event handler. Returns true when a button
-    // consumed the click. The callback itself calls invalidate().
+    // Called from the window event handler. Returns true when the event was
+    // consumed by a widget (click, key, text input, or IME composition).
+    // Callbacks mutate user State / LocalState and invalidate explicitly.
     bool handle_event(const Event& event);
 
     [[nodiscard]] const LayoutResult& layout() const noexcept;
+
+    // Current IME context (text + caret) for candidate positioning; valid
+    // after paint(). Empty when no input is focused.
+    [[nodiscard]] ImeContext ime_context() const noexcept;
 
 private:
     struct Impl;

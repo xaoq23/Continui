@@ -13,13 +13,14 @@ namespace continui::detail {
 struct ViewTreeAccess;
 
 struct ViewNode {
-    enum class Type : std::uint8_t { row, column, text, button, rect };
+    enum class Type : std::uint8_t { row, column, text, button, input, rect };
 
     Type type = Type::rect;
     Key key{};
     Style style{};
     std::string text;
     Callback callback;
+    TextCallback text_callback;
     ViewNode** children = nullptr;  // arena array of non-owning pointers
     std::uint32_t child_count = 0;
     std::uint32_t index = 0;  // preorder index, matches LayoutResult::boxes

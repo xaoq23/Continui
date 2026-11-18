@@ -72,7 +72,8 @@ SizeF measure_children(const ViewNode& node, const Constraints& constraints,
 SizeF measure(const ViewNode& node, const Constraints& constraints,
               const TextMeasurer& measurer) {
     SizeF intrinsic{0.0f, 0.0f};
-    if (node.type == ViewNode::Type::text || node.type == ViewNode::Type::button) {
+    if (node.type == ViewNode::Type::text || node.type == ViewNode::Type::button
+        || node.type == ViewNode::Type::input) {
         const Size measured = measurer.measure(node.text, node.style.font_size);
         intrinsic = SizeF{static_cast<float>(measured.width),
                           static_cast<float>(measured.height)};

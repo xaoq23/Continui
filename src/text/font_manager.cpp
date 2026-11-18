@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <vector>
 
 namespace continui {
 
@@ -87,6 +88,95 @@ std::string_view FontFace::family() const noexcept {
 
 FontWeight FontFace::weight() const noexcept {
     return impl_ != nullptr && impl_->bold ? FontWeight::bold : FontWeight::normal;
+}
+
+bool FontFace::covers(const char32_t codepoint) const noexcept {
+    if (impl_ == nullptr || impl_->face == nullptr) {
+        return false;
+    }
+    return FT_Get_Char_Index(impl_->face, static_cast<FT_ULong>(codepoint)) != 0;
+}
+
+GlyphRun shape_with_fallback(const FontFace* primary,
+                             const std::span<const FontFace* const> fallbacks,
+                             const std::string_view utf8, const float size_px) {
+    GlyphRun result;
+    result.face = primary;
+    result.size_px = size_px;
+    if (primary == nullptr || utf8.empty() || size_px <= 0.0f) {
+        return result;
+    }
+
+    // Split UTF-8 into codepoints; a fallback decision is per codepoint.
+    struct Segment {
+        char32_t codepoint;
+        std::string_view bytes;
+    };
+    std::vector<Segment> segments;
+    std::size_t i = 0;
+    while (i < utf8.size()) {
+        const unsigned char lead = static_cast<unsigned char>(utf8[i]);
+        std::size_t length = 1;
+        char32_t codepoint = 0;
+        if (lead < 0x80) {
+            codepoint = lead;
+        } else if ((lead & 0xE0) == 0xC0) {
+            length = 2;
+            codepoint = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            length = 3;
+            codepoint = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            length = 4;
+            codepoint = lead & 0x07;
+        } else {
+            ++i;
+            continue;
+        }
+        if (i + length > utf8.size()) {
+            ++i;
+            continue;
+        }
+        bool valid = true;
+        for (std::size_t j = 1; j < length; ++j) {
+            const unsigned char byte = static_cast<unsigned char>(utf8[i + j]);
+            if ((byte & 0xC0) != 0x80) {
+                length = j;
+                valid = false;
+                break;
+            }
+            codepoint = (codepoint << 6) | (byte & 0x3F);
+        }
+        if (valid) {
+            segments.push_back({codepoint, utf8.substr(i, length)});
+        }
+        i += length;
+    }
+
+    float pen = 0.0f;
+    for (const Segment& segment : segments) {
+        const FontFace* chosen = primary->covers(segment.codepoint) ? primary : nullptr;
+        if (chosen == nullptr) {
+            for (const FontFace* candidate : fallbacks) {
+                if (candidate != nullptr && candidate->covers(segment.codepoint)) {
+                    chosen = candidate;
+                    break;
+                }
+            }
+        }
+        if (chosen == nullptr) {
+            chosen = primary;  // .notdef from the primary face
+        }
+        GlyphRun one = chosen->shape(segment.bytes, size_px);
+        for (Glyph& glyph : one.glyphs) {
+            glyph.face = chosen;
+            glyph.offset_x += pen;
+            result.glyphs.push_back(glyph);
+        }
+        pen += one.width;
+    }
+    result.width = pen;
+    return result;
 }
 
 FontManager::FontManager() : impl_(std::make_unique<Impl>()) {

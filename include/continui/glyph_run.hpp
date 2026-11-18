@@ -20,6 +20,10 @@ struct Glyph {
     float advance = 0;   // pen advance after drawing this glyph (px)
     float offset_x = 0;  // pen offset while drawing this glyph (px)
     float offset_y = 0;  // y-down convention (HarfBuzz's y-up is flipped)
+    // Font that produced this glyph. Null means "use GlyphRun::face"; a
+    // fallback chain gives each glyph its own face so the batcher rasterizes
+    // it from the correct cmap (ADR-010 fallback chain).
+    const FontFace* face = nullptr;
 };
 
 // A shaped run of glyphs in visual order (Phase 0.5: single-run latin, LTR).

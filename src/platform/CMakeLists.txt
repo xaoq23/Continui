@@ -7,11 +7,13 @@ if(WIN32)
     add_library(continui_platform STATIC)
     target_sources(continui_platform PRIVATE
         windows/internal.hpp
+        windows/ime_tsf.hpp
+        windows/ime_tsf.cpp
         windows/platform_app.cpp
         windows/platform_window.cpp
     )
     target_compile_features(continui_platform PUBLIC cxx_std_23)
-    target_link_libraries(continui_platform PUBLIC continui_core user32 gdi32)
+    target_link_libraries(continui_platform PUBLIC continui_core user32 gdi32 ole32)
     target_compile_definitions(continui_platform PRIVATE UNICODE _UNICODE)
 else()
     add_library(continui_platform INTERFACE)

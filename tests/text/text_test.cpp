@@ -6,6 +6,7 @@
 #include "glyph_atlas.hpp"
 #include "glyph_cache.hpp"
 
+#include <array>
 #include <filesystem>
 #include <cstdint>
 #include <initializer_list>
@@ -195,9 +196,44 @@ void test_fonts_and_growth() {
 
 }  // namespace
 
+void test_fallback() {
+#ifdef _WIN32
+    const std::filesystem::path latin_path = "C:/Windows/Fonts/segoeui.ttf";
+    const std::filesystem::path cjk_path = "C:/Windows/Fonts/msyh.ttc";
+    if (!std::filesystem::exists(latin_path) || !std::filesystem::exists(cjk_path)) {
+        std::println("SKIP: fallback test needs segoeui.ttf + msyh.ttc");
+        return;
+    }
+    continui::FontManager fonts;
+    const auto latin = fonts.load_file(latin_path);
+    const auto cjk = fonts.load_file(cjk_path);
+    if (!latin || !cjk) {
+        check(false, "fallback test fonts load");
+        return;
+    }
+    check(!(*latin)->covers(U'中'), "latin face does not cover CJK");
+    check((*cjk)->covers(U'中'), "CJK fallback face covers CJK");
+
+    const std::array<const continui::FontFace* const, 1> fallbacks{*cjk};
+    const continui::GlyphRun run = continui::shape_with_fallback(
+        *latin, fallbacks, "Hi中", 24.0f);
+    check(run.glyphs.size() == 3, "fallback run has one glyph per codepoint");
+    check(run.glyphs.size() == 3 && run.glyphs[0].face == *latin
+          && run.glyphs[1].face == *latin,
+          "latin codepoints keep the primary face");
+    check(run.glyphs.size() == 3 && run.glyphs[2].face == *cjk
+          && run.glyphs[2].id != 0,
+          "CJK codepoint uses the fallback face with a real glyph");
+    check(run.width > 0.0f, "fallback run has a positive total advance");
+#else
+    std::println("SKIP: fallback test uses Windows system fonts");
+#endif
+}
+
 int main() {
     test_atlas_packer();
     test_fonts_and_growth();
+    test_fallback();
     if (failures == 0) {
         std::println("text tests passed");
     }

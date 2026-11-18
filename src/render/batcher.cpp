@@ -77,7 +77,10 @@ void BatchBuilder::text(const GlyphRun& run, const PointF origin,
     for (const Glyph& glyph : run.glyphs) {
         const float glyph_x = pen_x + glyph.offset_x;
         const float glyph_y = origin.y + glyph.offset_y;
-        const GlyphSlot slot = atlas.glyph(*run.face, run.size_px,
+        // A fallback run gives each glyph its own face; the batcher only ever
+        // needs the face to resolve the atlas strike (0.7 fallback chain).
+        const FontFace& face = glyph.face != nullptr ? *glyph.face : *run.face;
+        const GlyphSlot slot = atlas.glyph(face, run.size_px,
                                            subpixel_bucket(glyph_x), glyph.id);
         // Growth can swap the atlas mid-run: re-read the id on every glyph.
         // Quads recorded before the swap keep the OLD id and UVs, which are

@@ -73,7 +73,7 @@ shelf packer：`insert(w,h)`（`:11`）按行放置，单元格额外 +1px 透�
 ## 已知限制
 
 - 字体路径仅 ASCII（`FT_New_Face` 的 char* 接口）；TTC 只取第 0 个 face
-- 无 fallback 链（缺字显示 .notdef）；无色彩字形 / LCD 亚像素 / 双向文本 / 复杂脚本
+- fallback 链已实现（`shape_with_fallback`，逐 codepoint 选首个覆盖字体），但逐字符 shaping 不产生连字/kerning；无色彩字形 / LCD 亚像素 / 双向文本 / 复杂脚本
 - 图集无淘汰，封顶 2048；与 0.4 共用 16384 quad/帧的 uint16 索引上限
 - `size_px` 量化到 1/4 px 作为 key，但光栅化用原始 float（两个相近 size 可能共用第一次的位图）
 

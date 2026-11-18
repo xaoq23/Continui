@@ -72,6 +72,7 @@ GlyphRun shape_text(const FontFace& public_face, const FaceImpl& impl,
         glyph.advance = static_cast<float>(positions[i].x_advance) * px_per_unit;
         glyph.offset_x = static_cast<float>(positions[i].x_offset) * px_per_unit;
         glyph.offset_y = -static_cast<float>(positions[i].y_offset) * px_per_unit;
+        glyph.face = &public_face;
         run.width += glyph.advance;
         run.glyphs.push_back(glyph);
     }

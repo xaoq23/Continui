@@ -6,6 +6,9 @@
 #pragma once
 
 #include <continui/events.hpp>
+#include <continui/geometry.hpp>
+
+#include <string_view>
 
 namespace continui {
 
@@ -58,6 +61,11 @@ public:
 
     // Current client-area size in pixels.
     Size client_size() const;
+
+    // Feeds the platform IME (Windows TSF) the focused input's text and caret
+    // rectangle in client pixels, for candidate positioning and text sync.
+    // No-op when the window has no IME context.
+    void set_ime_context(std::string_view text, Rect caret, Rect text_bounds);
 
     // False only for a default-constructed handle.
     bool valid() const;

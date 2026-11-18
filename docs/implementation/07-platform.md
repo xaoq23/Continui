@@ -40,9 +40,10 @@ platform 隔离操作系统细节：窗口类注册、消息循环、事件翻�
 
 ## 已知限制
 
-- 无 touchpad、剪贴板、平台 IME、Monitor/DPI 事件（0.7/Phase 2）
+- Windows IME 已通过 TSF（`ime_tsf.cpp`，架构 §8.3）接入，翻译为 composition_* 事件；`UI::ime_context()` → `Window::set_ime_context()` → TSF 同步文本/caret/文本范围（屏幕坐标），候选窗按 caret 定位；真实中文输入法需手工验收（无法自动化测试）
+- 无 touchpad、剪贴板、Monitor/DPI 事件（Phase 2）
 - `request_redraw` 是旧接口，真正的失效走 `UI::invalidate`
-- 键盘输入尚未接入 UI（Counter 只能用鼠标；Escape 直接由 App 层处理）
+- 键盘输入已接入 UI（Tab/Enter/Space/方向键/Backspace/Delete + `WM_CHAR` 文本输入）
 
 ## 验证入口
 

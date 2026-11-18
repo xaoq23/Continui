@@ -3,6 +3,8 @@
 
 #include <continui/events.hpp>
 
+#include "ime_tsf.hpp"
+
 #include <functional>
 #include <memory>
 #include <string>
@@ -30,6 +32,8 @@ struct WindowImpl {
     std::function<void(const Event&)> handler;
     bool visible = false;
     bool closed = false;
+    std::uint32_t pending_high_surrogate = 0;  // WM_CHAR UTF-16 pair across messages
+    std::unique_ptr<TsfInputContext> tsf;  // Windows IME (architecture §8.3)
 };
 
 struct AppImpl {

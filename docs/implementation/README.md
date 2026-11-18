@@ -29,5 +29,5 @@
 | 0.4 | Implemented | Rect/Rounded/Texture/混合/scissor/合批 |
 | 0.5 | Implemented | FreeType + HarfBuzz、glyph atlas、动态增长、gamma |
 | 0.6 | Implemented（本地提交 `cb7c152`，未推送） | Arena/View/Flex/文本测量、命中、显式失效、Counter 闭环 |
-| 0.7 | Planned | 键盘输入、Focus、Text Input、IME、fallback 链 |
+| 0.7 | Implemented（独立审计 Accept；真实中文 IME 待手工验收） | LocalState、键盘/Focus、Text Input、TSF IME、fallback 链 |
 | 0.8 | Planned | Key 匹配、Tree Diff、脏区分级、局部重算 |
