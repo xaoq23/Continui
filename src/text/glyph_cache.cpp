@@ -77,17 +77,24 @@ std::optional<GlyphCache::Entry> GlyphCache::glyph(const FontFace& face,
     }
 
     auto cell = atlas_->insert(bitmap->width, bitmap->rows);
-    while (!cell) {
+    if (!cell) {
         // Flush pending pixels to the texture that earlier quads of this
         // frame already reference: grow() destroys this atlas and its dirty
         // rect, so waiting for the end-of-frame sync would lose them.
         if (before_growth_flush_) {
             before_growth_flush_();
         }
-        if (!grow()) {
+        // One rebuild to a size that fits: a single glyph can require both
+        // dimensions to double, and each extra grow() here would issue
+        // another flush against a texture whose size no longer matches the
+        // (already rebuilt) CPU atlas.
+        if (!grow(bitmap->width, bitmap->rows)) {
             return std::nullopt;  // no eviction in 0.5; capped atlas
         }
         cell = atlas_->insert(bitmap->width, bitmap->rows);
+    }
+    if (!cell) {
+        return std::nullopt;  // still too large after the capped rebuild
     }
 
     blit(*atlas_, *cell, *bitmap);
@@ -100,19 +107,25 @@ std::optional<GlyphCache::Entry> GlyphCache::glyph(const FontFace& face,
     return inserted->second.entry;
 }
 
-bool GlyphCache::grow() {
+bool GlyphCache::grow(const int needed_width, const int needed_height) {
     int width = atlas_->width();
     int height = atlas_->height();
-    // Double the smaller side: shelf packing benefits from long shelves.
-    if (height <= width && height < kMaxSize) {
-        height *= 2;
-    } else if (width < kMaxSize) {
-        width *= 2;
-    } else if (height < kMaxSize) {
-        height *= 2;
-    } else {
-        return false;  // 2048x2048 cap reached
-    }
+    // Double the smaller side first (shelves prefer wide atlases), repeating
+    // until the requested cell fits. One rebuild per glyph() call keeps the
+    // growth flush in sync with the texture the recorded quads reference.
+    // At least one doubling (the atlas is full), then keep going until the
+    // requested cell fits — a 512px glyph can require both sides to double.
+    do {
+        if (height <= width && height < kMaxSize) {
+            height *= 2;
+        } else if (width < kMaxSize) {
+            width *= 2;
+        } else if (height < kMaxSize) {
+            height *= 2;
+        } else {
+            return false;  // 2048x2048 cap reached
+        }
+    } while (width < needed_width + 1 || height < needed_height + 1);
 
     auto next = std::make_unique<GlyphAtlas>(width, height);
     // Two phases: if any glyph fails to re-pack, the old atlas and all

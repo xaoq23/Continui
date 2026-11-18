@@ -72,9 +72,10 @@ private:
         bool blank = false;
     };
 
-    // Grows the smaller dimension first (shelves prefer wide atlases), up
-    // to 2048 per side; re-inserts every cached bitmap. False when capped.
-    bool grow();
+    // Grows once to a size that fits a cell of the requested dimensions
+    // (doubling the smaller side repeatedly), up to 2048 per side; re-inserts
+    // every cached bitmap. False when capped.
+    bool grow(int needed_width, int needed_height);
     static void blit(GlyphAtlas& atlas, const GlyphAtlas::Cell& cell,
                      const GlyphBitmap& bitmap);
     static Entry make_entry(const GlyphAtlas::Cell& cell,

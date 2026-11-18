@@ -174,6 +174,17 @@ void test_fonts_and_growth() {
                   "re-packed cells still never overlap");
         }
     }
+    // A single large glyph must force exactly one rebuild/flush. Multiple
+    // rebuilds inside one glyph() call would make the backend flush a newer
+    // atlas size into the still-registered older texture (GPU validation).
+    GlyphCache big_cache;
+    int flushes = 0;
+    big_cache.set_before_growth_flush([&flushes] { ++flushes; });
+    const auto big = big_cache.glyph(*face, 512.0f, 0, ids.front());
+    check(big.has_value(), "a 512px glyph fits the capped atlas");
+    check(big_cache.generation() == 1 && flushes == 1,
+          "one large glyph triggers exactly one rebuild and one flush");
+
     // A repeated lookup hits the strike cache with identical placement.
     const auto first = cache.glyph(*face, 16.0f, 0, ids.front());
     const auto again = cache.glyph(*face, 16.0f, 0, ids.front());
