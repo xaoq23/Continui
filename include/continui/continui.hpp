@@ -7,6 +7,7 @@
 #include <continui/key.hpp>
 #include <continui/view.hpp>
 #include <continui/style.hpp>
+#include <continui/events.hpp>
 #include <continui/app.hpp>
 #include <continui/window.hpp>
 #include <continui/channel.hpp>

@@ -14,13 +14,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Export compile command database for clangd by default (developer convenience).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Project-wide warning policy (GCC/Clang only; MSVC flags land with its first
-# portability pass). Interface targets have no compile units today, but this
-# keeps every future code target consistent without per-target repetition.
+# Project-wide warning policy. MSVC gets /W4 and /utf-8 since Phase 0.2
+# (Win32 backend); deeper MSVC-specific passes remain for later phases.
 add_compile_options(
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wextra>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
 
@@ -32,14 +33,15 @@ add_subdirectory(src/layout)
 add_subdirectory(src/render)
 add_subdirectory(src/platform)
 
-# The umbrella target users link against. render/platform are excluded until
-# their first real implementation lands (Phase 0.2 platform, Phase 0.3
-# backend); until then they carry no public API a consumer could use.
+# The umbrella target users link against. The platform module joined in
+# Phase 0.2 (Win32); render joins when the first gfx backend lands (Phase
+# 0.3), until then it carries no public API a consumer could use.
 add_library(continui INTERFACE)
 target_link_libraries(continui INTERFACE
     continui_core
     continui_style
     continui_layout
+    continui_platform
 )
 target_compile_features(continui INTERFACE cxx_std_23)
 
