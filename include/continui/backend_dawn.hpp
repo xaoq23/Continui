@@ -1,15 +1,23 @@
 // Dawn GPU renderer (ADR-009).
 //
-// Status: Phase 0.3 — device/surface/swapchain bring-up and one triangle.
-// The gfx::Device abstraction and Painter arrive with the render system in
-// Phase 0.4; until then this is the only GPU-facing public type.
+// Status: Phase 0.4 — batched 2D drawing. One pipeline draws anti-aliased
+// rects / rounded rects / textures with premultiplied alpha and scissor
+// clipping, driven by the paint callback's Painter records (ADR-007). The
+// gfx::Device abstraction and an invalidation-driven frame path remain
+// future work.
 //
 // Threading contract: main thread only, like all App/Window methods.
 #pragma once
 
 #include <continui/app.hpp>
+#include <continui/events.hpp>
+#include <continui/painter.hpp>
+#include <continui/texture.hpp>
 
+#include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 
 namespace continui {
@@ -26,10 +34,10 @@ enum class GpuError {
 
 namespace dawn {
 
-// Frame-ticked Dawn renderer for one window. render_frame() clears, draws
-// one triangle, and presents. It reconfigures the swapchain whenever the
-// client size changed (Phase 0.3 interim: size polling, no invalidation-
-// driven repaint yet — that arrives with the render system).
+// Frame-ticked Dawn renderer for one window. render_frame() records the
+// paint callback into batches, uploads them, and presents one indexed draw
+// per batch. It reconfigures the swapchain whenever the client size changed
+// (Phase 0.3 interim: size polling, no invalidation-driven repaint yet).
 class Renderer {
 public:
     // Attaches to the window's native surface and registers an App frame
@@ -50,6 +58,27 @@ public:
     // Draws and presents one frame. No-op when the window is gone or the
     // renderer was moved-from.
     void render_frame();
+
+    // Registers the per-frame paint callback. Each presented frame calls it
+    // once with a Painter that records into that frame's batches; records
+    // made outside the callback draw nothing. Passing nullptr clears it.
+    // The callback runs on the main thread inside render_frame();
+    // exceptions propagate to the run_one_frame() caller (ADR-019, same
+    // boundary as event callbacks).
+    void set_paint_callback(std::function<void(Painter&)> callback);
+
+    // Uploads straight-alpha RGBA8 pixel data as a texture that lives until
+    // this renderer is destroyed. Returns an invalid handle when the input
+    // is rejected (empty size, null data, or byte_count != width*height*4)
+    // or when Dawn rejects the upload. Ids are never reused; drawn through
+    // Painter::image().
+    Texture create_texture(Size size, const std::uint8_t* rgba,
+                           std::size_t byte_count);
+
+    // Main-thread diagnostic: true once any uncaptured GPU error occurred
+    // since create() (WGSL compile failure, validation error, ...). For
+    // tests and bring-up debugging; not part of the drawing contract.
+    bool had_uncaptured_errors() const;
 
 private:
     Renderer() = default;

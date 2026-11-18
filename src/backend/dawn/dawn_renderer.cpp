@@ -4,6 +4,14 @@
 //   CreateInstance -> RequestAdapter (futures callback) -> RequestDevice ->
 //   CreateSurface (SurfaceSourceWindowsHWND chain) -> GetCapabilities ->
 //   Configure -> per-frame GetCurrentTexture / render / Present.
+//
+// Phase 0.4 rendering: the paint callback records into a BatchBuilder; each
+// frame uploads its vertex/index data into persistent buffers and issues one
+// indexed draw per batch (one texture + one scissor). One pipeline serves
+// everything: the fragment stage evaluates a rounded-box SDF for the
+// anti-aliased shape alpha, samples the texture (solid rects use a 1x1
+// white texture), and blends premultiplied alpha.
+//
 // API notes (why some names look unfamiliar):
 //   - RequestAdapter/RequestDevice are futures-based; the synchronous path
 //     is WaitAny(future, UINT64_MAX) with CallbackMode::WaitAnyOnly.
@@ -16,6 +24,7 @@
 
 #include <continui/platform_windows.hpp>
 
+#include "batcher.hpp"
 #include "dawn/webgpu_cpp.h"
 
 // min/max macros would poison the Dawn headers and the std:: usage below.
@@ -24,27 +33,98 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace continui::detail {
 namespace {
 
-// Interior triangle in clip space; vertex_index selects the position so the
-// pipeline needs no buffers at all (minimal Phase 0.3 acceptance shape).
-constexpr char kTriangleShader[] = R"(
+// Pixel-space pipeline. Vertex input matches BatchVertex exactly (64 bytes).
+// The SDF parameters travel per-vertex so rounded corners cost nothing.
+constexpr char kQuadShader[] = R"(
+    struct ScreenUniform {
+        half_size : vec2f,
+        padding : vec2f,
+    };
+    @group(0) @binding(0) var<uniform> screen : ScreenUniform;
+
+    struct VertexIn {
+        @location(0) pos_uv : vec4f,
+        @location(1) tint : vec4f,
+        @location(2) rect : vec4f,    // cx, cy, hw, hh (pixel space)
+        @location(3) radius : vec4f,  // tl, tr, br, bl
+    };
+
+    struct VertexOut {
+        @builtin(position) pos : vec4f,
+        @location(0) uv : vec2f,
+        @location(1) tint : vec4f,
+        @location(2) rect : vec4f,
+        @location(3) radius : vec4f,
+    };
+
     @vertex
-    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-        var pos = array<vec2f, 3>(vec2f(0.0, 0.5),
-                                  vec2f(-0.5, -0.5),
-                                  vec2f(0.5, -0.5));
-        return vec4f(pos[i], 0.0, 1.0);
+    fn vs(v : VertexIn) -> VertexOut {
+        var out : VertexOut;
+        // Pixel (y down) -> NDC (y up). The max() guards the uniform being
+        // zero before the first frame; real frames always have a size.
+        let ndc_x = v.pos_uv.x / max(screen.half_size.x, 1.0) - 1.0;
+        let ndc_y = 1.0 - v.pos_uv.y / max(screen.half_size.y, 1.0);
+        out.pos = vec4f(ndc_x, ndc_y, 0.0, 1.0);
+        out.uv = v.pos_uv.zw;
+        out.tint = v.tint;
+        out.rect = v.rect;
+        out.radius = v.radius;
+        return out;
     }
+
+    @group(1) @binding(0) var samp : sampler;
+    @group(1) @binding(1) var tex : texture_2d<f32>;
+
+    // radius = (tl, tr, br, bl); pixel y grows downward, so p.y < 0 is the
+    // top half. select(false_value, true_value, condition).
+    fn corner_radius(radius : vec4f, p : vec2f) -> f32 {
+        return select(
+            select(radius.z, radius.y, p.y < 0.0),  // right half: br / tr
+            select(radius.w, radius.x, p.y < 0.0),  // left half:  bl / tl
+            p.x < 0.0);
+    }
+
+    // Rounded-box signed distance (Inigo Quilez's form, scalar radius).
+    // d < 0 inside the shape, d = 0 on the edge.
+    fn sd_rounded_box(p : vec2f, b : vec2f, r : f32) -> f32 {
+        let q = abs(p) - b + r;
+        return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    }
+
     @fragment
-    fn fs() -> @location(0) vec4f {
-        return vec4f(0.16, 0.40, 0.86, 1.0);
+    fn fs(in : VertexOut) -> @location(0) vec4f {
+        // @builtin(position) arrives in framebuffer coordinates with the
+        // pixel center at (x.5, y.5) — exactly the coordinate the distance
+        // field consumes, and y already grows downward like our pixel space.
+        let p = in.pos.xy - in.rect.xy;
+        let d = sd_rounded_box(p, in.rect.zw, corner_radius(in.radius, p));
+
+        // One-pixel anti-aliased coverage; the field is in pixel units, so
+        // its screen-space derivative is ~1.
+        let aa = max(fwidth(d), 1e-6);
+        let coverage = 1.0 - smoothstep(-aa, aa, d);
+
+        let texel = textureSample(tex, samp, in.uv);
+        // CPU pixels are straight alpha; blending is premultiplied, and a
+        // premul tint multiplies componentwise in premul space.
+        var color = vec4f(texel.rgb * texel.a, texel.a);
+        color *= coverage;
+        return color * in.tint;
     }
 )";
 
@@ -84,8 +164,18 @@ public:
             app_->set_frame_callback(nullptr);  // the callback captures this
         }
         // Release in reverse creation order; Unconfigure detaches the
-        // surface from the swapchain state before the handles die.
+        // surface from the swapchain state before the handles die. The
+        // texture map / buffers / bind groups release before device_ does
+        // (member declaration order), so their last references die first.
         pipeline_ = nullptr;
+        textures_.clear();
+        white_bind_group_ = nullptr;
+        white_view_ = nullptr;
+        screen_bind_group_ = nullptr;
+        sampler_ = nullptr;
+        vertex_buffer_ = nullptr;
+        index_buffer_ = nullptr;
+        screen_buffer_ = nullptr;
         if (surface_) {
             surface_.Unconfigure();
             surface_ = nullptr;
@@ -101,6 +191,8 @@ public:
         error_seen_ = true;
         debug_log("continui: uncaptured GPU error: ", message);
     }
+
+    bool had_uncaptured_errors() const { return error_seen_; }
 
     std::expected<void, GpuError> initialize(App& app, const Window& window) {
         app_ = &app;
@@ -156,17 +248,122 @@ public:
         return {};
     }
 
+    void set_paint_callback(std::function<void(Painter&)> callback) {
+        paint_callback_ = std::move(callback);
+    }
+
+    // Uploads straight-alpha RGBA8 pixel data as a new texture owned by the
+    // renderer. Returns an invalid handle when the input is rejected (empty
+    // size, null data, wrong byte count) or when Dawn rejects the upload
+    // (detected through the uncaptured-error flag, which fires synchronously
+    // inside WriteTexture validation).
+    Texture create_texture(const Size size, const std::uint8_t* rgba,
+                           const std::size_t byte_count) {
+        if (size.width <= 0 || size.height <= 0 || rgba == nullptr) {
+            return Texture{};
+        }
+        const std::size_t needed =
+            static_cast<std::size_t>(size.width) * static_cast<std::size_t>(size.height) * 4;
+        if (byte_count != needed) {
+            return Texture{};
+        }
+        if (!device_ || !queue_) {
+            return Texture{};
+        }
+
+        const std::uint64_t id = next_texture_id_++;
+        wgpu::TextureDescriptor desc{};
+        desc.label = "continui-texture";
+        desc.size = {static_cast<std::uint32_t>(size.width),
+                     static_cast<std::uint32_t>(size.height), 1};
+        desc.format = wgpu::TextureFormat::RGBA8Unorm;
+        desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+        wgpu::Texture texture = device_.CreateTexture(&desc);
+        if (!texture || error_seen_) {
+            return Texture{};  // never pass a null texture to WriteTexture
+        }
+
+        // WebGPU requires bytesPerRow to be a multiple of 256 for copies,
+        // but callers hand over tightly packed rows (stride = width * 4).
+        // Stage a padded copy whenever the tight stride is not aligned.
+        const std::uint32_t row_bytes = static_cast<std::uint32_t>(size.width) * 4;
+        const std::uint32_t aligned_rows = (row_bytes + 255u) & ~255u;
+        const std::uint8_t* upload = rgba;
+        std::vector<std::uint8_t> staged;
+        if (aligned_rows != row_bytes) {
+            staged.resize(static_cast<std::size_t>(aligned_rows)
+                          * static_cast<std::size_t>(size.height));
+            for (int y = 0; y < size.height; ++y) {
+                std::memcpy(staged.data()
+                                + static_cast<std::size_t>(y) * aligned_rows,
+                            rgba + static_cast<std::size_t>(y) * row_bytes,
+                            row_bytes);
+            }
+            upload = staged.data();
+        }
+
+        wgpu::TexelCopyTextureInfo destination{};
+        destination.texture = texture;
+        wgpu::TexelCopyBufferLayout layout{};
+        layout.bytesPerRow = aligned_rows;
+        const wgpu::Extent3D extent{static_cast<std::uint32_t>(size.width),
+                                    static_cast<std::uint32_t>(size.height), 1};
+        const bool had_error = error_seen_;
+        queue_.WriteTexture(&destination, upload,
+                            staged.empty() ? byte_count : staged.size(), &layout,
+                            &extent);
+        if (error_seen_ != had_error) {
+            return Texture{};  // the failed texture object dies here
+        }
+
+        wgpu::TextureView view = texture.CreateView();
+        wgpu::BindGroup bind_group = make_texture_bind_group(view);
+        textures_.emplace(id, TextureEntry{std::move(texture), std::move(view),
+                                           std::move(bind_group), size});
+        return Texture{id, size};
+    }
+
     // One presented frame. Steps that cannot proceed (moved-from, window
     // gone, minimized to zero area) leave the frame skipped, not an error:
-    // a dropped frame is recoverable, a thrown exception is not.
+    // a dropped frame is recoverable, a thrown exception is not. Paint
+    // callback exceptions propagate to the run_one_frame() caller (ADR-019
+    // boundary, same as event callbacks).
     void render_frame() {
         if (!device_ || !surface_) {
             return;
         }
-
-        const bool configured = reconfigure_if_resized();
-        if (!configured) {
+        if (!reconfigure_if_resized()) {
             return;
+        }
+
+        const Size viewport{configured_width_, configured_height_};
+        batcher_.begin_frame(viewport);
+        if (paint_callback_) {
+            Painter painter{batcher_};
+            paint_callback_(painter);
+        }
+        batcher_.finish_frame();
+
+        const auto& vertices = batcher_.vertices();
+        const auto& indices = batcher_.indices();
+        const auto& batches = batcher_.batches();
+
+        // Uniform: the pixel-to-NDC half extents (16 bytes, vec2f padded).
+        const float half_size[4]{viewport.width * 0.5f, viewport.height * 0.5f,
+                                 0.0f, 0.0f};
+        queue_.WriteBuffer(screen_buffer_, 0, half_size, sizeof(half_size));
+
+        // Upload the frame's geometry; persistent buffers regrow on demand.
+        const std::size_t vbytes = vertices.size() * sizeof(BatchVertex);
+        const std::size_t ibytes = indices.size() * sizeof(std::uint16_t);
+        if (!ensure_buffers(vbytes, ibytes)) {
+            return;
+        }
+        if (vbytes > 0) {
+            queue_.WriteBuffer(vertex_buffer_, 0, vertices.data(), vbytes);
+        }
+        if (ibytes > 0) {
+            queue_.WriteBuffer(index_buffer_, 0, indices.data(), ibytes);
         }
 
         wgpu::SurfaceTexture surface_texture{};
@@ -190,7 +387,30 @@ public:
         wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
         wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&pass_desc);
         pass.SetPipeline(pipeline_);
-        pass.Draw(3);  // three vertices from vertex_index, no vertex buffers
+        pass.SetBindGroup(0, screen_bind_group_);
+        // Bind geometry only when there is geometry: a bufferless frame
+        // (no paint callback, nothing recorded) must stay a plain clear.
+        if (!indices.empty()) {
+            pass.SetVertexBuffer(0, vertex_buffer_);
+            pass.SetIndexBuffer(index_buffer_, wgpu::IndexFormat::Uint16);
+        }
+        for (const Batch& batch : batches) {
+            // Batcher scissors are viewport-clamped; integer-floored here so
+            // the scissor rect covers the same pixels the SDF would fade in.
+            const std::uint32_t sx = static_cast<std::uint32_t>(std::floor(batch.scissor.x));
+            const std::uint32_t sy = static_cast<std::uint32_t>(std::floor(batch.scissor.y));
+            const std::uint32_t sw =
+                static_cast<std::uint32_t>(std::ceil(batch.scissor.right())) - sx;
+            const std::uint32_t sh =
+                static_cast<std::uint32_t>(std::ceil(batch.scissor.bottom())) - sy;
+            pass.SetScissorRect(sx, sy, sw, sh);
+            pass.SetBindGroup(1, bind_group_for(batch.texture_id));
+            // The stored indices are frame-absolute vertex ids, so baseVertex
+            // must stay 0: passing vertex_offset would shift every fetched
+            // index again (applied by the device at execution, and silent —
+            // out-of-range vertex fetch is hardware-defined, not validated).
+            pass.DrawIndexed(batch.index_count, 1, batch.index_offset, 0, 0);
+        }
         pass.End();
         wgpu::CommandBuffer commands = encoder.Finish();
         queue_.Submit(1, &commands);
@@ -254,9 +474,12 @@ private:
         return queue_ != nullptr;
     }
 
+    // One pipeline for every Phase 0.4 shape: SDF alpha + texture + premul
+    // blending. Group 0 carries the screen uniform (vertex stage), group 1
+    // the sampler+texture pair (fragment stage, rebound per batch).
     bool create_pipeline() {
         wgpu::ShaderSourceWGSL shader_source{};
-        shader_source.code = kTriangleShader;
+        shader_source.code = kQuadShader;
         wgpu::ShaderModuleDescriptor shader_desc{};
         shader_desc.nextInChain = &shader_source;
         wgpu::ShaderModule module = device_.CreateShaderModule(&shader_desc);
@@ -264,8 +487,70 @@ private:
             return false;
         }
 
+        wgpu::BindGroupLayoutEntry screen_entry{};
+        screen_entry.binding = 0;
+        screen_entry.visibility = wgpu::ShaderStage::Vertex;
+        screen_entry.buffer.type = wgpu::BufferBindingType::Uniform;
+
+        wgpu::BindGroupLayoutDescriptor screen_bgl_desc{};
+        screen_bgl_desc.label = "continui-screen-bgl";
+        screen_bgl_desc.entryCount = 1;
+        screen_bgl_desc.entries = &screen_entry;
+        wgpu::BindGroupLayout screen_bgl = device_.CreateBindGroupLayout(&screen_bgl_desc);
+
+        wgpu::BindGroupLayoutEntry texture_entries[2]{};
+        texture_entries[0].binding = 0;
+        texture_entries[0].visibility = wgpu::ShaderStage::Fragment;
+        texture_entries[0].sampler.type = wgpu::SamplerBindingType::Filtering;
+        texture_entries[1].binding = 1;
+        texture_entries[1].visibility = wgpu::ShaderStage::Fragment;
+        texture_entries[1].texture.sampleType = wgpu::TextureSampleType::Float;
+        texture_entries[1].texture.viewDimension = wgpu::TextureViewDimension::e2D;
+
+        wgpu::BindGroupLayoutDescriptor texture_bgl_desc{};
+        texture_bgl_desc.label = "continui-texture-bgl";
+        texture_bgl_desc.entryCount = 2;
+        texture_bgl_desc.entries = texture_entries;
+        texture_bgl_ = device_.CreateBindGroupLayout(&texture_bgl_desc);
+
+        wgpu::BindGroupLayout layouts[2]{screen_bgl, texture_bgl_};
+        wgpu::PipelineLayoutDescriptor layout_desc{};
+        layout_desc.bindGroupLayoutCount = 2;
+        layout_desc.bindGroupLayouts = layouts;
+        wgpu::PipelineLayout layout = device_.CreatePipelineLayout(&layout_desc);
+
+        wgpu::VertexBufferLayout vertex_layout{};
+        vertex_layout.arrayStride = sizeof(BatchVertex);
+        vertex_layout.stepMode = wgpu::VertexStepMode::Vertex;
+        wgpu::VertexAttribute attributes[4]{};
+        constexpr wgpu::VertexFormat kFormats[4]{
+            wgpu::VertexFormat::Float32x4, wgpu::VertexFormat::Float32x4,
+            wgpu::VertexFormat::Float32x4, wgpu::VertexFormat::Float32x4};
+        constexpr std::uint64_t kOffsets[4]{0, 16, 32, 48};
+        for (int i = 0; i < 4; ++i) {
+            // Field-by-field: braced assignment would match nextInChain
+            // first and fail to compile.
+            attributes[i].format = kFormats[i];
+            attributes[i].offset = kOffsets[i];
+            attributes[i].shaderLocation = static_cast<std::uint32_t>(i);
+        }
+        vertex_layout.attributeCount = 4;
+        vertex_layout.attributes = attributes;
+
+        // Premultiplied alpha over: out = src + dst * (1 - src.a), with the
+        // same weights on the alpha channel.
+        wgpu::BlendState blend{};
+        blend.color.srcFactor = wgpu::BlendFactor::One;
+        blend.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+        blend.color.operation = wgpu::BlendOperation::Add;
+        blend.alpha.srcFactor = wgpu::BlendFactor::One;
+        blend.alpha.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+        blend.alpha.operation = wgpu::BlendOperation::Add;
+
         wgpu::ColorTargetState target{};
         target.format = surface_format_;
+        target.blend = &blend;
+        target.writeMask = wgpu::ColorWriteMask::All;
 
         wgpu::FragmentState fragment{};
         fragment.module = module;
@@ -274,13 +559,145 @@ private:
         fragment.targets = &target;
 
         wgpu::RenderPipelineDescriptor pipeline_desc{};
-        pipeline_desc.label = "continui-triangle";
+        pipeline_desc.label = "continui-batched-quads";
+        pipeline_desc.nextInChain = nullptr;
+        pipeline_desc.layout = layout;
         pipeline_desc.vertex.module = module;
         pipeline_desc.vertex.entryPoint = "vs";
+        pipeline_desc.vertex.bufferCount = 1;
+        pipeline_desc.vertex.buffers = &vertex_layout;
         pipeline_desc.fragment = &fragment;
 
+        if (!screen_bgl || error_seen_) {
+            return false;
+        }
         pipeline_ = device_.CreateRenderPipeline(&pipeline_desc);
-        return pipeline_ != nullptr && !error_seen_;
+        if (!pipeline_ || error_seen_) {
+            return false;
+        }
+
+        if (!create_presentation_resources(std::move(screen_bgl))) {
+            return false;
+        }
+        return true;
+    }
+
+    bool create_presentation_resources(wgpu::BindGroupLayout screen_bgl) {
+        wgpu::BufferDescriptor buffer_desc{};
+        buffer_desc.label = "continui-screen-uniform";
+        buffer_desc.size = 16;  // vec2f half_size + padding
+        buffer_desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Uniform;
+        screen_buffer_ = device_.CreateBuffer(&buffer_desc);
+        if (!screen_buffer_ || error_seen_) {
+            return false;
+        }
+
+        wgpu::BindGroupEntry screen_entry{};
+        screen_entry.binding = 0;
+        screen_entry.buffer = screen_buffer_;
+        screen_entry.size = 16;
+        wgpu::BindGroupDescriptor screen_bg_desc{};
+        screen_bg_desc.layout = screen_bgl;
+        screen_bg_desc.entryCount = 1;
+        screen_bg_desc.entries = &screen_entry;
+        screen_bind_group_ = device_.CreateBindGroup(&screen_bg_desc);
+        if (!screen_bind_group_ || error_seen_) {
+            return false;
+        }
+
+        wgpu::SamplerDescriptor sampler_desc{};
+        sampler_desc.label = "continui-sampler";
+        sampler_desc.magFilter = wgpu::FilterMode::Linear;
+        sampler_desc.minFilter = wgpu::FilterMode::Linear;
+        sampler_desc.addressModeU = wgpu::AddressMode::ClampToEdge;
+        sampler_desc.addressModeV = wgpu::AddressMode::ClampToEdge;
+        sampler_ = device_.CreateSampler(&sampler_desc);
+        if (!sampler_ || error_seen_) {
+            return false;
+        }
+
+        // Solid rects sample one white texel; texture id 0 maps to it.
+        constexpr std::uint8_t white_pixel[4] = {255, 255, 255, 255};
+        wgpu::TextureDescriptor white_desc{};
+        white_desc.label = "continui-white-texture";
+        white_desc.size = {1, 1, 1};
+        white_desc.format = wgpu::TextureFormat::RGBA8Unorm;
+        white_desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+        wgpu::Texture white = device_.CreateTexture(&white_desc);
+        if (!white || error_seen_) {
+            return false;
+        }
+        wgpu::TexelCopyTextureInfo destination{};
+        destination.texture = white;
+        wgpu::TexelCopyBufferLayout layout{};
+        const wgpu::Extent3D extent{1, 1, 1};
+        queue_.WriteTexture(&destination, white_pixel, sizeof(white_pixel),
+                            &layout, &extent);
+        if (error_seen_) {
+            return false;
+        }
+        white_view_ = white.CreateView();
+        white_bind_group_ = make_texture_bind_group(white_view_);
+        if (!white_view_ || !white_bind_group_ || error_seen_) {
+            return false;
+        }
+        return true;
+    }
+
+    wgpu::BindGroup make_texture_bind_group(const wgpu::TextureView& view) {
+        wgpu::BindGroupEntry entries[2]{};
+        entries[0].binding = 0;
+        entries[0].sampler = sampler_;
+        entries[1].binding = 1;
+        entries[1].textureView = view;
+        wgpu::BindGroupDescriptor desc{};
+        desc.layout = texture_bgl_;
+        desc.entryCount = 2;
+        desc.entries = entries;
+        return device_.CreateBindGroup(&desc);
+    }
+
+    // (Re)creates the frame buffers when the frame outgrows them. Capacity
+    // doubles so a growing phase 0.4 workload re-creates logarithmically
+    // often; the buffers are never shared mid-frame, so replacement is safe.
+    bool ensure_buffers(const std::uint64_t vbytes, const std::uint64_t ibytes) {
+        if (vbytes > vertex_capacity_) {
+            const std::uint64_t capacity =
+                std::max<std::uint64_t>(vbytes, vertex_capacity_ * 2);
+            wgpu::BufferDescriptor desc{};
+            desc.label = "continui-vertex-buffer";
+            desc.size = capacity;
+            desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Vertex;
+            vertex_buffer_ = device_.CreateBuffer(&desc);
+            vertex_capacity_ = vertex_buffer_ ? capacity : 0;
+            if (!vertex_buffer_ || error_seen_) {
+                return false;
+            }
+        }
+        if (ibytes > index_capacity_) {
+            const std::uint64_t capacity =
+                std::max<std::uint64_t>(ibytes, index_capacity_ * 2);
+            wgpu::BufferDescriptor desc{};
+            desc.label = "continui-index-buffer";
+            desc.size = capacity;
+            desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Index;
+            index_buffer_ = device_.CreateBuffer(&desc);
+            index_capacity_ = index_buffer_ ? capacity : 0;
+            if (!index_buffer_ || error_seen_) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    wgpu::BindGroup bind_group_for(const std::uint64_t texture_id) const {
+        if (texture_id == 0) {
+            return white_bind_group_;
+        }
+        const auto it = textures_.find(texture_id);
+        // Unregistered ids cannot come out of the batcher; the white texture
+        // is the defensive default that keeps a frame presentable.
+        return it != textures_.end() ? it->second.bind_group : white_bind_group_;
     }
 
     // Phase 0.3 interim: the client size is polled every frame; the
@@ -321,6 +738,13 @@ private:
         return true;
     }
 
+    struct TextureEntry {
+        wgpu::Texture texture;
+        wgpu::TextureView view;
+        wgpu::BindGroup bind_group;
+        Size size{};
+    };
+
     App* app_ = nullptr;          // never null after successful initialize
     bool registered_ = false;     // frame callback currently registered with the App
     bool error_seen_ = false;     // any uncaptured GPU error since device creation
@@ -334,6 +758,28 @@ private:
     wgpu::TextureFormat surface_format_ = wgpu::TextureFormat::Undefined;
     int configured_width_ = 0;
     int configured_height_ = 0;
+
+    // Frame resources. The batcher and the paint callback live here so the
+    // per-frame data stays hot across frames.
+    BatchBuilder batcher_;
+    std::function<void(Painter&)> paint_callback_;
+
+    // Presentation resources, created with the pipeline.
+    wgpu::BindGroupLayout texture_bgl_;  // group 1, needed per bind group
+    wgpu::BindGroup screen_bind_group_;
+    wgpu::BindGroup white_bind_group_;
+    wgpu::TextureView white_view_;
+    wgpu::Sampler sampler_;
+    wgpu::Buffer screen_buffer_;
+    wgpu::Buffer vertex_buffer_;
+    wgpu::Buffer index_buffer_;
+    std::uint64_t vertex_capacity_ = 0;
+    std::uint64_t index_capacity_ = 0;
+
+    // All textures live until the renderer dies (Phase 0.4 lifetime rule);
+    // explicit destruction arrives with the TextureCache.
+    std::unordered_map<std::uint64_t, TextureEntry> textures_;
+    std::uint64_t next_texture_id_ = 1;
 };
 
 // Out-of-line because it needs the complete DawnRendererImpl type. A second
@@ -371,6 +817,24 @@ void Renderer::render_frame() {
     if (impl_ != nullptr) {
         impl_->render_frame();
     }
+}
+
+void Renderer::set_paint_callback(std::function<void(Painter&)> callback) {
+    if (impl_ != nullptr) {
+        impl_->set_paint_callback(std::move(callback));
+    }
+}
+
+Texture Renderer::create_texture(const Size size, const std::uint8_t* rgba,
+                                 const std::size_t byte_count) {
+    if (impl_ != nullptr) {
+        return impl_->create_texture(size, rgba, byte_count);
+    }
+    return Texture{};
+}
+
+bool Renderer::had_uncaptured_errors() const {
+    return impl_ != nullptr && impl_->had_uncaptured_errors();
 }
 
 }  // namespace continui::dawn

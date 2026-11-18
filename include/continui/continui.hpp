@@ -6,7 +6,9 @@
 
 #include <continui/key.hpp>
 #include <continui/view.hpp>
+#include <continui/geometry.hpp>
 #include <continui/style.hpp>
+#include <continui/texture.hpp>
 #include <continui/events.hpp>
 #include <continui/app.hpp>
 #include <continui/window.hpp>
