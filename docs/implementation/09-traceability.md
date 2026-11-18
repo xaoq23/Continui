@@ -1,0 +1,128 @@
+# 09 — 可追溯性：决策、缺陷、审计与代码位置
+
+本文记录"为什么代码长这样"以及"哪个问题在哪儿修的"。新增缺陷/决策时按文末模板追加，不要只改代码不留痕。
+
+## 1. ADR 与决策状态
+
+| ADR | 主题 | 状态 | 代码落点 |
+|---|---|---|---|
+| ADR-005 | Arena 管理帧内临时对象 | Accepted | `include/continui/arena.hpp`、`src/render/ui.cpp:55` |
+| ADR-006 | Key 寻址控件身份和局部状态 | Accepted（局部状态仍未实现） | `key.hpp`、`ui.cpp` 的 `callbacks_` |
+| ADR-009 | Dawn 作为首个图形后端 | Accepted | `src/backend/dawn/` |
+| ADR-010 | HarfBuzz + FreeType | Accepted | `src/text/`、`src/render/text_context.hpp` |
+| ADR-011 | Channel 作为跨线程数据入口 | Accepted（实现 Planned） | `channel.hpp` 仍是空占位 |
+| ADR-013 | Flex 参考 Taffy | **Proposed（未采纳）** | 0.6 自写最小 Flex，无新依赖 |
+| ADR-019 | Phase 0.2 异常边界 | Accepted | `platform_window.cpp:198`、事件泵不捕获 |
+| ADR-020 | clang 工具链 | Accepted | `CMakePresets.json` |
+
+**业主决策记录**：
+- gamma 系数：0.5 采用 1.2（FreeType），未采用 ADR 中提到的 1.6（DirectWrite）；依据 Impeller 源码的语义区分，业主 2026-11-18 确认保持 1.2
+- umbrella：0.4 漏加 `continui_render`，0.5 收尾时补上（`57c12a5`），业主确认
+- 0.6 范围：按业主提供的里程碑建议，把 0.7 的按钮命中与 0.8 的显式失效提前成垂直切片；不冒充 0.7/0.8 验收
+
+## 2. 审计发现 → 修复闭环
+
+### Phase 0.3（首次 GPU bring-up 审计）
+
+| 发现 | 修复 | 代码位置 |
+|---|---|---|
+| F1 静默 GPU 错误（无 uncaptured callback） | 安装 uncaptured-error + device-lost 回调，`error_seen_` 在每个资源创建点检查 | `dawn_renderer.cpp:162,210` |
+| F2 回调被覆盖 | `registered_` 标志，析构时注销 | `dawn_renderer.cpp:179` 附近 |
+| F7 平台依赖未声明 | `PRIVATE continui_platform` | `src/backend/dawn/CMakeLists.txt` |
+| HWND 复用 / stale surface | 记为已知限制（多窗口/DPI 阶段处理） | `dawn_renderer.cpp:853` 附近注释 |
+
+### Phase 0.4（渲染系统审计，FAIL → 修正后接受）
+
+| 发现 | 证据 | 修复 | 代码位置 |
+|---|---|---|---|
+| **F1 [MAJOR] baseVertex 双重偏移**：批次 2..N 静默丢失（审计员截图证实棋盘格/条纹窗消失） | `DrawIndexed(..., vertex_offset, 0)` 第 4 参是 baseVertex；索引帧绝对 → 二次偏移；Dawn 不校验顶点越界 | 传 0；契约写进 Batch 文档；回归测试钉死跨批次索引 | `dawn_renderer.cpp:537`、`batcher.hpp:35`、`tests/render/batcher_test.cpp:125` 附近 |
+| F2 [MINOR] 测试盲区（无像素观察） | 4/4 全绿但一半内容没画 | `had_uncaptured_errors()` + 程序化断言；索引回归测试 | `backend_dawn.hpp`、`dawn_renderer.cpp:985` |
+| F3 [MINOR] 16384 quads 静默丢弃 | `vertices_.size()+4 > 65536` 直接 return | 明确记为已知限制（offsets 一致，不损坏） | `batcher.cpp:70` 附近注释 |
+| F4 [MINOR] Texture friend 过宽 | BatchBuilder 从不访问 Texture 私有成员 | 删除 friend 与未用 include | `texture.hpp` |
+| F5–F8 [INFO] SDF/gamma/白纹理兜底/私有 include | 无行动，文档化权衡 | 同各模块文档 | — |
+
+**教训**：目视验收必须对照明确检查清单；"测试全绿 + 目视正常"不能替代实验。
+
+### Phase 0.5（文本系统审计，FAIL → 修正 → 复核 PASS）
+
+| 发现 | 证据 | 修复 | 代码位置 |
+|---|---|---|---|
+| **CRITICAL：text quad 尺寸用归一化 UV**（10px 字形在 256 图集里算成 0.039px）→ 全部文字不可见 | 诊断打印 `v5 pos=(40.03,31)`；审计员与我的独立截图一致 | `GlyphSlot` 增加 `width_px/height_px`；batcher 用像素字段；假 context CPU 测试钉死 10×14px quad | `text_context.hpp:26`、`batcher.cpp:88`、`tests/render/batcher_test.cpp:266` 附近 |
+| **MAJOR：增长帧旧纹理脏像素未上传** | 本帧早先 quad 引用旧 id；旧图集对象被 grow 销毁，脏 rect 丢失 | `set_before_growth_flush` 回调；增长前 sync 到旧纹理 | `glyph_cache.cpp:79`、`dawn_renderer.cpp:172` |
+| MINOR：临时诊断代码残留 | `[text-diag]` fprintf | 全部删除 | `dawn_renderer.cpp`（grep 无残留） |
+| MINOR：测试无法抓 GPU 缺陷 | 全绿但无文字 | 新增 quad 尺寸 CPU 回归 + 增长测试 | 同上测试文件 |
+| 复核残留 MINOR：单个 512px 字形触发 2 次增长 | 探针输出 generation=2 / 2 flushes；第二次把新尺寸写进旧纹理 → 校验错误 | `grow(w,h)` 一次到位（do-while 至少翻倍）；增长后复查 cell；512px 回归测试 | `glyph_cache.cpp:110`、`tests/text/text_test.cpp:180` 附近 |
+
+最终复核结论：**PASS / Accept**（审计员独立实测 1 次增长 1 次 flush、截图确认全部文字正常）。
+
+### Phase 0.6（UI 闭环审计）
+
+**审计结论：FAIL（1 CRITICAL + 5 MINOR/INFO）→ 修复 → 复现程序验证通过。**
+
+| 发现 | 证据 | 修复 | 代码位置 |
+|---|---|---|---|
+| **CRITICAL：FrameArena 原地替换仍被占用的块 → use-after-free** | `arena.hpp:117` 的 `blocks_[current_] = std::move(block)` 释放了本帧仍持有 ViewNode 和析构登记的块；审计员用 25 节点树在第 2/3 帧复现 0xC0000005；现有测试树太小（<4 KiB）从未覆盖 | 永不替换已占用块，改为在末尾追加新块并推进 `current_`；新增"400 个非平凡对象 × 4 帧"回归测试 | `arena.hpp:114` 附近、`tests/layout/layout_test.cpp::test_arena_growth_across_frames` |
+| MINOR：重复显式 Key 静默覆盖回调 | `ui.cpp:79` 用 `operator[]`；架构 §4.3 要求重复 Key 必须检测 | 记入已知限制（0.8 处理） | `ui.cpp:79` |
+| MINOR：resize 不触发 UI 失效 → 命中旧几何 | 事件处理器只处理 mouse_button_up | 记入已知限制（Resize 阶段处理；示例可用 `invalidate(layout)`） | `ui.cpp:152`、`examples/counter/main.cpp` |
+| MINOR：`flex_basis` 在 Column 上仍用 width 的 min/max 钳制 | `layout_solver.cpp:148` | 记入已知限制（已在 `02-style.md`/`03-layout.md` 记录） | `layout_solver.cpp:148` |
+| MINOR：固有尺寸漏算子节点 margin；min/max 与 padding 重复钳制 | `layout_solver.cpp:54–99` | 记入已知限制 | 同上 |
+| INFO：`solve()` 写 `ViewNode::index`；hit_test 注释与实现不符；setter 不自动失效 | 代码审查 | 文档化（确定性不受影响；按钮优先规则未实现，已修正注释预期） | `layout_solver.cpp:113`、`layout.hpp:54`、`ui.cpp:143` |
+
+**修复后验证**：
+- `cmake --build --preset clang` + `ctest --preset clang` 7/7；MSVC 6/6
+- 审计员原复现程序（`%TEMP%/opencode/arena_tree.cpp`，25 节点 × 3 帧）重编译运行：`frame 0/1/2: boxes=25 ... ok=1`，退出码 0（修复前第 2 帧崩溃）
+- 审计建议的替代验证（复现程序 + 新回归测试）已满足；若后续要求正式复核，在此补录
+
+**其他验证为干净**：公共头无第三方泄漏、`ui.hpp` 独立包含可编译、模块边界无环、0.4/0.5 无回退；Counter 三次独立截图均确认 42→41→42。
+
+## 3. 已知问题登记（未修，但已记录）
+
+| 问题 | 影响 | 归属阶段 | 代码位置 |
+|---|---|---|---|
+| `flex_basis` 钳制用 `min_width/max_width`，Column 应用 height | 纵向 flex_basis 可能被横向约束错误钳制 | 待修（0.6 后续） | `layout_solver.cpp:135` 附近 |
+| 自动 Key 是位置序，重复 Key 未检测 | 列表重排/重复 Key 时身份错乱；违反架构 §4.3 规则 3 | 0.8 | `arena.hpp` / `view_tree.cpp` |
+| 无 Tree Diff / 脏区分级；任何失效整树重算 | 性能问题，不是正确性问题 | 0.8 | `ui.cpp:152` |
+| 事件使用上一帧布局 | resize 后首帧点击可能命中旧几何 | 0.8 / 输入阶段 | `ui.cpp:164` |
+| 字体路径仅 ASCII；TTC 取 face 0 | Unicode 路径/字体集合受限 | 后续平台阶段 | `font_manager.cpp:101` |
+| 图集无淘汰，上限 2048；无 fallback 链 | 大字数/多语言缺字 | 0.7+ | `glyph_cache.cpp:110` |
+| uint16 索引上限 16384 quads/帧，超出静默丢弃 | 文本密集帧可能丢字 | 后续（u32 索引） | `batcher.cpp:70` |
+| 无 GPU 像素回读 | 只能靠目视/截图 + CPU 契约测试 | 后续 | `tests/backend/` |
+| HWND 复用 / display-mode 变化 stale surface | 多窗口/DPI 阶段处理 | 后续 | `dawn_renderer.cpp:853` |
+
+## 4. 测试矩阵
+
+| 测试 | 覆盖代码 | 能抓什么 |
+|---|---|---|
+| `tests/core/key_test.cpp` 等 | Phase 0.1–0.2 | 基础契约 |
+| `tests/render/batcher_test.cpp` | batcher | 拓扑、合批、帧绝对索引、text quad 像素尺寸、gamma 指数 |
+| `tests/render/ui_test.cpp` | ui.cpp | 命中→回调→失效→重绘，回调不重入，外部点击忽略 |
+| `tests/layout/layout_test.cpp` | arena + solver + invalidation | 生命周期、gap/padding/flex/对齐/钳制/命中/合并 |
+| `tests/text/text_test.cpp` | text 模块 | shaping、metrics、图集增长、512px 单次增长 |
+| `tests/backend/dawn_renderer_test.cpp` | 全 GPU 路径 | bring-up、纹理、painted 帧、增长负载、resize、uncaptured error |
+
+**已知盲区**：没有任何 GPU 像素回读断言；0.4/0.5 的两次"全绿但画面错误"都靠截图实验发现。目视验收必须使用逐项检查清单。
+
+## 5. 提交地图
+
+| 提交 | 内容 |
+|---|---|
+| `ef13083` | ADR-009/020 文档 |
+| `8d9365d` | Phase 0.4 渲染系统（20 文件，+1465） |
+| `88eec82` | 0.1–0.4 状态标记 |
+| `1581a58` | Phase 0.5 文本系统（31 文件，+1786） |
+| `ed23fb3` | ADR-010 转正 + 0.5 状态 |
+| `fe25b23` | 0.5 多增长残留修复 |
+| `57c12a5` | umbrella 补 continui_render |
+| `cb7c152` | Phase 0.6 UI 闭环（22 文件，+1453） |
+
+## 6. 新增追溯记录的模板
+
+```markdown
+### [日期] 一句话标题
+- 症状/发现：（用户可见现象或审计结论，附截图/日志路径）
+- 证据：（file:line + 实际代码/运行结果）
+- 根因：（机制解释，不是猜测）
+- 修复：（改了什么、为什么这样改）
+- 验证：（命令 + 结果；如涉及画面，写明截图检查项）
+- 提交：（hash）
+```
