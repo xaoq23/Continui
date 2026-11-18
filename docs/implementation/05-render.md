@@ -63,7 +63,7 @@ render 把"绘制意图"变成 GPU 可消费的 CPU 数据：`Painter` 是公共
 ## 已知限制
 
 - UI 未做 Tree Diff / 脏区分级（Phase 0.8），无效失效也会整树重算
-- 按钮/输入框的 hover/pressed/focus 由 LocalState 提供（`ui.cpp`、0.7）；焦点环（focus ring）在绘制层用半透明圆角框近似，文本 caret 只画在末尾，选区矩形与 caret 任意位置尚未实现
+- 按钮/输入框的 hover/pressed/focus 由 LocalState 提供（`ui.cpp`、0.7）；聚焦反馈由库硬编码为最小亮蓝边框（无样式 API，遵循"先只做 HTML、样式留到后续层"的决策），用四条细矩形绘制，透明/不透明背景均可见；composition 预览期间 caret 移到预览串末尾；caret 支持任意字符位置与选区矩形
 - uint16 索引上限 16384 quads/帧（0.4 已知限制，文本密集帧也要注意）
 - `TextRasterContext::atlas_texture()` 每 glyph 查询一次（增长时换 id 的代价）
 

@@ -170,7 +170,10 @@ GlyphRun shape_with_fallback(const FontFace* primary,
         GlyphRun one = chosen->shape(segment.bytes, size_px);
         for (Glyph& glyph : one.glyphs) {
             glyph.face = chosen;
-            glyph.offset_x += pen;
+            // Do NOT fold `pen` into offset_x: the batcher already advances
+            // pen_x by each glyph.advance, so adding it here double-counts
+            // spacing (user-visible regression: "42" rendered as "4 2",
+            // text overflowing buttons/inputs). offset_x stays font-local.
             result.glyphs.push_back(glyph);
         }
         pen += one.width;

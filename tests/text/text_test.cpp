@@ -225,6 +225,25 @@ void test_fallback() {
           && run.glyphs[2].id != 0,
           "CJK codepoint uses the fallback face with a real glyph");
     check(run.width > 0.0f, "fallback run has a positive total advance");
+
+    // The batcher accumulates pen_x from glyph.advance itself. If fallback
+    // folds the running pen into offset_x, spacing doubles ("42" -> "4 2",
+    // text overflows boxes). Assert per-glyph offsets stay font-local by
+    // comparing against direct shaping of the same latin text.
+    const continui::GlyphRun fallback_latin = continui::shape_with_fallback(
+        *latin, fallbacks, "Hi", 24.0f);
+    const continui::GlyphRun direct_latin = (*latin)->shape("Hi", 24.0f);
+    check(fallback_latin.glyphs.size() == direct_latin.glyphs.size(),
+          "fallback run keeps one glyph per shaped codepoint");
+    check(fallback_latin.glyphs.size() == 2
+          && std::fabs(fallback_latin.glyphs[1].offset_x
+                       - direct_latin.glyphs[1].offset_x) < 1e-3f,
+          "fallback does not double-count advances in glyph offsets");
+    check(fallback_latin.glyphs.size() == 2
+          && std::fabs((fallback_latin.glyphs[0].advance
+                        + fallback_latin.glyphs[1].advance)
+                       - fallback_latin.width) < 1e-3f,
+          "fallback width equals the sum of glyph advances");
 #else
     std::println("SKIP: fallback test uses Windows system fonts");
 #endif

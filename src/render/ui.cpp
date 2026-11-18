@@ -248,8 +248,19 @@ struct UI::Impl {
             const bool focused = is_interactive && it != widget_states.end()
                                  && it->second.focused;
             if (focused) {
-                painter.rounded_rect(box.bounds, Radius::all(style.radius + 2.0f),
-                                     Paint{Color::rgba(120, 170, 255, 90)});
+                // Minimal, hardcoded focus feedback (library-first: no style
+                // API). Four thin rects form a border that is visible for both
+                // opaque and transparent backgrounds — a single enlarged filled
+                // rect would look like a solid block when background.a == 0.
+                constexpr Color kFocus = Color::rgb(120, 170, 255);
+                constexpr float w = 2.0f;
+                const Rect b = box.bounds;
+                painter.rect({b.x - w, b.y - w, b.width + 2.0f * w, w},
+                             Paint{kFocus});
+                painter.rect({b.x - w, b.bottom(), b.width + 2.0f * w, w},
+                             Paint{kFocus});
+                painter.rect({b.x - w, b.y, w, b.height}, Paint{kFocus});
+                painter.rect({b.right(), b.y, w, b.height}, Paint{kFocus});
             }
             if (style.background.a > 0) {
                 painter.rounded_rect(box.bounds, Radius::all(style.radius),
@@ -299,20 +310,25 @@ struct UI::Impl {
                                      Paint{Color::rgba(80, 120, 200, 120)});
                     }
                 }
-                const float caret_x = x_at_char(input_state.caret);
+                // The composition preview occupies space at the caret, so the
+                // visible caret moves to the END of the preview while composing
+                // (architecture §8.3 caret sync). The candidate window anchors
+                // to that same advanced position.
+                float caret_x = x_at_char(input_state.caret);
+                if (input_state.composing && !input_state.composition.empty()) {
+                    const GlyphRun preview =
+                        fallback_fonts.empty()
+                            ? font->shape(input_state.composition, style.font_size)
+                            : shape_with_fallback(font, fallback_fonts,
+                                                  input_state.composition,
+                                                  style.font_size);
+                    painter.text(preview, {caret_x, y},
+                                 Paint{Color::rgba(255, 255, 120, 255)});
+                    caret_x += preview.width;
+                }
                 const float caret_h = std::max(2.0f, text_height * 0.9f);
                 ime_caret_ = Rect{caret_x, top, 1.5f, caret_h};
                 painter.rect(ime_caret_, Paint{style.foreground});
-                if (it->second.composing && !it->second.composition.empty()) {
-                    const GlyphRun preview =
-                        fallback_fonts.empty()
-                            ? font->shape(it->second.composition, style.font_size)
-                            : shape_with_fallback(font, fallback_fonts,
-                                                  it->second.composition,
-                                                  style.font_size);
-                    painter.text(preview, {caret_x + 3.0f, y},
-                                 Paint{Color::rgba(255, 255, 120, 255)});
-                }
             }
         }
     }

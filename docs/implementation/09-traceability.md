@@ -127,6 +127,16 @@
   - [MINOR N4] 文档不一致 → 已修正。
   - **第三轮复核结论：Accept**——审计员强制重编译两工具链（clang 7/7、MSVC 6/6，无警告），并用真实 pre-fix `ui.cpp` 对照程序证明 F9 回归测试能抓到双重提交（修复后 `"Hi中Z"`、pre-fix `"Hi中Z预"`）。N1 的 `ClientToScreen`/`ScreenToClient` 方向经 MSDN API 契约核对正确。无阻塞代码发现；真实中文 IME 仍需手工验收（环境无法自动化 TIP 驱动）。
 
+### 用户手工验收发现的回归（提交 af1b1b0 之后）
+
+| 现象 | 根因 | 修复 | 验证 |
+|---|---|---|---|
+| 数字 "42" 显示为 "4 2"、按钮/输入框文字间距翻倍并溢出容器 | `shape_with_fallback` 把累计 pen 加进 `glyph.offset_x`，batcher 又按 `advance` 累加 → pen 算两次 | 去掉 `offset_x += pen`，pen 只用于 `result.width`；新增 fallback 与直接 shaping 的 offset 对比断言 | clang 7/7、MSVC 6/6；截图确认显示正常 |
+| composition 预输入时 caret 不跟随 | 预览串画在 caret 右侧但 caret 坐标未加预览宽度 | 预览串占位于 caret，caret 移到预览末尾，`ime_caret_` 同步跟随 | 用户复测确认 |
+| 点击输入框无聚焦提示 | focus ring 画在背景之前，被不透明背景盖住 | 库硬编码最小亮蓝边框（四条细矩形，透明/不透明背景均可见），不暴露样式 API；`ui_test::test_focus_feedback` 断言透明背景也有反馈 | clang 7/7、MSVC 6/6 |
+
+**架构决策（业主确认）**：先不扩展样式系统，保持"HTML/CSS 解耦"方向、当前只做结构层（View 树/布局/交互）。聚焦反馈由库硬编码最小实现，不新增 Style 字段；用户若需自定义样式，留待未来样式层（Phase 1）。此前一度加入的 `Style::focus_ring` 字段已按此决策撤销。review 指出的"透明背景实心块"问题已由四条细矩形边框解决。
+
 ## 3. 已知问题登记（未修，但已记录）
 
 | 问题 | 影响 | 归属阶段 | 代码位置 |

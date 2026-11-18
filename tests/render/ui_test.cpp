@@ -224,6 +224,42 @@ void test_editing_regressions() {
     check(state.text == "X", "insertion after backspace lands at the caret");
 }
 
+void test_focus_feedback() {
+    using namespace continui;
+    // Transparent background: the hardcoded border must still be drawn (a
+    // single enlarged filled rect would look like a solid block instead).
+    UI ui([&](FrameArena& arena, const LocalState&) {
+        Style input;  // default Style{} has background.a == 0
+        input.width = 150;
+        input.height = 40;
+        Style container;
+        container.padding = {20, 20, 20, 20};  // keep all four border edges in view
+        const auto field = Input(arena, Key{40}, "abc",
+                                 [](std::string_view) {}, input);
+        return Row(arena, {field}, container);
+    });
+    ui.set_text_measurer(std::make_unique<FakeMeasurer>());
+
+    detail::BatchBuilder batches;
+    auto paint = [&] {
+        batches.begin_frame(Size{800, 600});
+        Painter painter{batches};
+        ui.paint(painter, Size{800, 600});
+        batches.finish_frame();
+        return batches.vertices().size();
+    };
+    const std::size_t unfocused = paint();
+    Event tab{};
+    tab.type = EventType::key_down;
+    tab.key = KeyCode::tab;
+    ui.handle_event(tab);  // focus the input
+    const std::size_t focused = paint();
+    // Four border rects = 4 quads = 16 extra vertices (no background quad to
+    // confuse the count). Checks the feedback exists with a transparent bg.
+    check(focused == unfocused + 16,
+          "hardcoded focus border is drawn even with a transparent background");
+}
+
 }  // namespace
 
 int main() {
@@ -370,6 +406,7 @@ int main() {
 
     test_interaction();
     test_editing_regressions();
+    test_focus_feedback();
 
     if (failures != 0) {
         std::println(stderr, "ui_test: {} check(s) failed", failures);
