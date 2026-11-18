@@ -120,7 +120,7 @@ continui
 
 目标：Windows + Dawn，完成最小可运行 GUI。
 
-**0.1 工程初始化**
+**0.1 工程初始化** — Implemented
 
 - 建立 CMake 工程、模块目录。
 - 接入 Dawn。
@@ -130,7 +130,7 @@ continui
 
 验收：项目能够稳定构建；第三方依赖版本固定；提供独立的 Hello World 工程。
 
-**0.2 Window 与事件循环**
+**0.2 Window 与事件循环** — Implemented
 
 - 创建原生窗口。
 - 处理窗口关闭、尺寸变化。
@@ -139,7 +139,7 @@ continui
 
 验收：创建、显示、关闭窗口；不依赖额外 GUI 框架；外部代码可以驱动单帧运行。
 
-**0.3 GPU 初始化**
+**0.3 GPU 初始化** — Implemented
 
 - 创建 Dawn Instance、Adapter、Device、Surface。
 - 创建 SwapChain 对应的呈现资源。
@@ -147,7 +147,7 @@ continui
 
 验收：稳定显示三角形；正确响应窗口尺寸变化；正确释放 GPU 资源。
 
-**0.4 基础绘制**
+**0.4 基础绘制** — Implemented
 
 - Rect、Rounded Rect、Color、Texture。
 - Alpha Blending、DrawBatch。
