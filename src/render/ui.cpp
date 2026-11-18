@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <print>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace continui {
@@ -47,6 +49,9 @@ struct UI::Impl {
     LayoutResult layout;
     std::vector<const detail::ViewNode*> nodes;
     std::unordered_map<Key, Callback> callbacks;
+    // Diagnostics are one-shot per Key: evaluate() rebuilds callbacks every
+    // frame, so without this a persistent duplicate would print each frame.
+    std::unordered_set<Key> warned_duplicate_keys;
     std::unique_ptr<TextMeasurer> measurer;
     const FontFace* font = nullptr;
     Invalidation pending = Invalidation::view;
@@ -76,7 +81,16 @@ struct UI::Impl {
                 current->index = static_cast<std::uint32_t>(nodes.size());
                 nodes.push_back(current);
                 if (current->type == detail::ViewNode::Type::button && current->callback) {
-                    callbacks[current->key] = current->callback;
+                    // A duplicate Key used to silently overwrite the first
+                    // callback (0.6 audit MINOR). Keep the first registration
+                    // and diagnose so routing stays deterministic.
+                    if (!callbacks.emplace(current->key, current->callback).second
+                        && warned_duplicate_keys.insert(current->key).second) {
+                        std::println(stderr,
+                                     "continui: duplicate Key {} on a button; "
+                                     "keeping the first callback",
+                                     current->key.value);
+                    }
                 }
             }
             if (frame.next_child < current->child_count) {
@@ -143,14 +157,24 @@ Invalidation UI::pending() const noexcept { return impl_->pending; }
 void UI::set_font(const FontFace* face) {
     impl_->font = face;
     impl_->measurer = std::make_unique<FaceMeasurer>(face);
+    // A different face changes text measurement -> geometry; the minimum
+    // correct response is a layout invalidation (0.6 audit INFO).
+    invalidate(Invalidation::layout);
 }
 
 void UI::set_text_measurer(std::unique_ptr<TextMeasurer> measurer) {
     impl_->measurer = std::move(measurer);
+    invalidate(Invalidation::layout);
 }
 
 void UI::paint(Painter& painter, const Size viewport) {
-    impl_->viewport = viewport;
+    if (viewport != impl_->viewport) {
+        // A resize changes the root constraints but neither business state
+        // nor the view tree; the minimum correct response is a layout
+        // invalidation (0.6 audit MINOR: resizes left stale hit geometry).
+        invalidate(Invalidation::layout);
+        impl_->viewport = viewport;
+    }
     // Phase 0.6 keeps the levels for callers and merging, but every
     // non-none level re-evaluates the whole (tiny) tree; dirty-region and
     // partial recomputation arrive in Phase 0.8.

@@ -30,11 +30,11 @@ layout 把声明式 `View` 树转换成 `LayoutResult`（每个节点的盒子�
 2. **布置**（`place` `:242`，`place_children` `:130`）
    - `collect_preorder` `:103` 用显式栈给每个节点写 `index`，并生成与 boxes 同序的列表
    - 内容区 = `inset(bounds, padding)`（`:24`）
-   - 主轴：`bases[]` = flex_basis 或测量值；`free = main_span - used`
+   - 主轴：`bases[]` = flex_basis 或测量值（flex_basis 按主轴选 min/max 字段，Column 用 height），`free = main_span - used`
    - `free > 0` 且有 grow → 按 `flex_grow` 比例分配（`:176`）；`free < 0` 且有 shrink → 按 `flex_shrink * basis` 比例收缩（`:178`）
    - 没有 grow 且 `free > 0` 时，`justify_content` 生效（`:186–200`）：center 偏移 free/2，end 偏移 free，space_between 把 free 均分到 gap 增量
    - 交叉轴：`align_items` 中 stretch 用整条交叉跨度，center/end 做偏移（`:201–211`）
-   - 子节点 margin 在分配到的槽位内再次内缩（`:213–222`）
+   - 子节点 margin 计入容器固有尺寸（`measure_children`），并在分配到的槽位内再次内缩（`:213–222`）
    - 递归 `place()` 写 `LayoutBox`，容器继续布置子节点
 
 `hit_test`（`:284`）逆序遍历前序 boxes → 最后一个包含点的盒子（即最深的节点）。`LayoutResult::find(Key)`（`:257`）线性查找。
@@ -57,8 +57,6 @@ layout 把声明式 `View` 树转换成 `LayoutResult`（每个节点的盒子�
 ## 已知限制
 
 - 只支持 Row/Column 的 Flex 子集；无 wrap、cross-axis reverse、auto margin、aspect ratio
-- `flex_basis` 钳制错用 `min_width/max_width`（Column 应为 height）— 待修，见 `09-traceability.md`
-- 子节点 margin 未计入容器固有尺寸
 - `align_items` 的 stretch 会覆盖子节点的显式交叉尺寸（如 Row 内显式 height 的按钮被拉伸到行高）
 - `ViewNode::index` 写入让 `solve` 严格说来不是 const-pure；改为外部索引映射可消除
 - 无 TextMeasure 缓存失效协议；字体/字号变化由 UI 整树重算兜底

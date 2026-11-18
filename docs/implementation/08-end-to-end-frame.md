@@ -59,7 +59,7 @@ View = build(arena)  ──► ViewNode 树（arena 内，本帧有效）
 
 ## 为什么事件必须用"上一帧"布局
 
-`App::run_one_frame()` 先泵消息再调用 frame callback。若事件里直接查"本帧"布局，它还没算出来；用上一帧 boxes 是唯一一致的选择。代价：resize 后的第一帧点击可能落在旧几何上（0.6 已知限制，尚无输入重映射）。
+`App::run_one_frame()` 先泵消息再调用 frame callback。若事件里直接查"本帧"布局，它还没算出来；用上一帧 boxes 是唯一一致的选择。`UI::paint` 会在 viewport 变化时触发 `invalidate(layout)`，所以 resize 后的重绘会用新约束重新求解；但 resize 当帧的事件仍命中旧几何（事件先于 paint 泵出，输入重映射属 0.8）。
 
 ## 一次典型的失效合并
 

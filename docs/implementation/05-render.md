@@ -42,6 +42,8 @@ render 把"绘制意图"变成 GPU 可消费的 CPU 数据：`Painter` 是公共
 
 **事件顺序**：App 先泵事件（此时用上一帧 layout），再调用渲染器帧回调 → `UI::paint` 若失效则重建。回调里 `ui.invalidate()` 保证下一帧重建；UI 对象必须比其回调捕获的引用活得久（MSVC 下不能在 `UI ui([&]{ui.invalidate();})` 初始化中捕获自身，示例用 `UI* ui_ptr` 提前声明）。
 
+**失效触发补充**（0.6 审计残留清理）：`paint` 比较传入 viewport 与缓存值，变化则 `invalidate(layout)`；`set_font`/`set_text_measurer` 同样触发 `invalidate(layout)`；按钮 Key 用 `callbacks.emplace` 登记，重复时输出 stderr 诊断并保留先登记者，不再静默覆盖。
+
 ### TextRasterContext（`src/render/text_context.hpp`）
 
 窄接口：`glyph(face,size,bucket,id) -> GlyphSlot{uv(normalized),left,top,width_px,height_px}` 与 `atlas_texture()`。backend 实现它；render 只见接口。

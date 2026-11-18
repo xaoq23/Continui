@@ -65,7 +65,7 @@ UI::Impl::callbacks_ (Key → std::function) ── 跨帧，从 arena 复制出
 
 - `Channel` 仍为空占位（Phase 1）
 - `LocalState`（focus/hover/scroll/cursor）未实现
-- 自动 Key 是位置序；列表重排需要显式 Key 重载，重复 Key **未检测**（架构 §4.3 规则 3 尚未满足）
+- 自动 Key 是位置序；列表重排需要显式 Key 重载。按钮回调层已检测重复 Key（stderr 诊断 + 保留先登记者），节点级重复唯一性强制留待 0.8（架构 §4.3 规则 3）
 - `View` 树无 diff/reconcile：每帧重建（Phase 0.8）
 
 ## 验证入口

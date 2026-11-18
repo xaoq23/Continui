@@ -20,6 +20,10 @@ void check(const bool ok, const char* what) {
     }
 }
 
+bool approx(const float got, const float want, const float eps = 1e-4f) {
+    return std::fabs(got - want) <= eps;
+}
+
 struct FakeMeasurer final : continui::TextMeasurer {
     [[nodiscard]] continui::Size measure(const std::string_view text,
                                          const float) const override {
@@ -103,6 +107,64 @@ int main() {
     outside.position = Point{700, 500};
     check(!ui.handle_event(outside), "clicks outside buttons are ignored");
     check(state.count == 41, "ignored clicks leave state untouched");
+
+    // --- 0.6 audit regression: resize / setters / duplicate key --------
+    {
+        UI local([](FrameArena& arena) {
+            Style panel;
+            panel.width = 300;
+            panel.height = 100;
+            return Solid(arena, panel);
+        });
+        local.set_text_measurer(std::make_unique<FakeMeasurer>());
+
+        detail::BatchBuilder local_batches;
+        local_batches.begin_frame(Size{200, 600});
+        Painter p1{local_batches};
+        local.paint(p1, Size{200, 600});
+        local_batches.finish_frame();
+        check(approx(local.layout().root_bounds.width, 200.0f),
+              "small viewport clamps the root box");
+
+        local_batches.begin_frame(Size{500, 600});
+        Painter p2{local_batches};
+        local.paint(p2, Size{500, 600});
+        local_batches.finish_frame();
+        check(approx(local.layout().root_bounds.width, 300.0f),
+              "viewport resize re-solves the layout with new constraints");
+        check(local.pending() == Invalidation::none,
+              "resize paint consumes the layout invalidation");
+
+        local.set_text_measurer(std::make_unique<FakeMeasurer>());
+        check(local.pending() == Invalidation::layout,
+              "set_text_measurer invalidates layout");
+        local.set_font(nullptr);
+        check(local.pending() == Invalidation::layout,
+              "set_font invalidates layout");
+
+        int first = 0;
+        int second = 0;
+        UI dup([&](FrameArena& arena) {
+            const View a = Button(arena, Key{9}, "a", [&] { ++first; }, {});
+            const View b = Button(arena, Key{9}, "b", [&] { ++second; }, {});
+            return Row(arena, {a, b}, {});
+        });
+        dup.set_text_measurer(std::make_unique<FakeMeasurer>());
+        local_batches.begin_frame(Size{800, 600});
+        Painter p3{local_batches};
+        dup.paint(p3, Size{800, 600});
+        local_batches.finish_frame();
+        const LayoutBox* box = dup.layout().find(Key{9});
+        check(box != nullptr, "duplicate key still resolves to a box");
+        Event dup_click{};
+        dup_click.type = EventType::mouse_button_up;
+        dup_click.button = MouseButton::left;
+        dup_click.position = Point{static_cast<int>(box->bounds.x + 2),
+                                   static_cast<int>(box->bounds.y + 10)};
+        check(dup.handle_event(dup_click), "duplicate-key button consumes the click");
+        check(first == 1 && second == 0,
+              "duplicate key keeps the first callback instead of overwriting");
+    }
 
     if (failures != 0) {
         std::println(stderr, "ui_test: {} check(s) failed", failures);

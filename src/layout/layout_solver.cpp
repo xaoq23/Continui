@@ -34,20 +34,6 @@ struct SizeF {
     float height = 0;
 };
 
-// Constrains a measured size by explicit dimensions and the style's min/max.
-SizeF apply_style_size(const SizeF measured, const Style& style) noexcept {
-    SizeF result = measured;
-    if (style.width >= 0.0f) {
-        result.width = style.width;
-    }
-    if (style.height >= 0.0f) {
-        result.height = style.height;
-    }
-    result.width = clamp_value(result.width, style.min_width, style.max_width);
-    result.height = clamp_value(result.height, style.min_height, style.max_height);
-    return result;
-}
-
 SizeF measure(const ViewNode& node, const Constraints& constraints,
               const TextMeasurer& measurer);
 
@@ -64,9 +50,18 @@ SizeF measure_children(const ViewNode& node, const Constraints& constraints,
         }
         // Children are measured intrinsically; final sizes are resolved by
         // the flex distribution in place_children against the content box.
+        // A child's margin consumes layout space and must be included here.
+        // place_children builds its slots from the same margin-inclusive
+        // basis, so intrinsic sizing and placement agree (0.6 audit MINOR).
         const SizeF child_size = measure(*child, constraints, measurer);
-        main += (row ? child_size.width : child_size.height);
-        cross = std::max(cross, row ? child_size.height : child_size.width);
+        const float child_main = row ? child_size.width : child_size.height;
+        const float child_cross = row ? child_size.height : child_size.width;
+        const float main_margin = row ? child->style.margin.horizontal()
+                                      : child->style.margin.vertical();
+        const float cross_margin = row ? child->style.margin.vertical()
+                                       : child->style.margin.horizontal();
+        main += child_main + main_margin;
+        cross = std::max(cross, child_cross + cross_margin);
         if (i + 1 < node.child_count) {
             main += gap;
         }
@@ -84,15 +79,18 @@ SizeF measure(const ViewNode& node, const Constraints& constraints,
     } else if (is_container(node)) {
         intrinsic = measure_children(node, constraints, measurer);
     }
-    SizeF result = apply_style_size(intrinsic, node.style);
-    // Auto dimensions describe the content box; add padding to reach the
-    // border box. Explicit width/height are already border-box sizes.
-    if (node.style.width < 0.0f) {
-        result.width += node.style.padding.horizontal();
-    }
-    if (node.style.height < 0.0f) {
-        result.height += node.style.padding.vertical();
-    }
+    // Explicit width/height are border-box sizes. Auto dimensions describe
+    // the content box, so add padding to reach the border box. Clamp min/max
+    // and parent constraints exactly once, on the final border-box size:
+    // clamping before padding double-applies min/max to auto sizes (0.6 audit
+    // MINOR, e.g. min_width=100 + padding 40 used to produce 140).
+    SizeF result;
+    result.width = node.style.width >= 0.0f
+                       ? node.style.width
+                       : intrinsic.width + node.style.padding.horizontal();
+    result.height = node.style.height >= 0.0f
+                        ? node.style.height
+                        : intrinsic.height + node.style.padding.vertical();
     result.width = clamp_value(result.width, node.style.min_width, node.style.max_width);
     result.height = clamp_value(result.height, node.style.min_height, node.style.max_height);
     result.width = clamp_value(result.width, constraints.min_width, constraints.max_width);
@@ -145,10 +143,19 @@ void place_children(const ViewNode& node, const Rect& content,
             continue;
         }
         sizes[i] = measure(*child, constraints, measurer);
-        bases[i] = child->style.flex_basis >= 0.0f
-                       ? std::clamp(child->style.flex_basis, child->style.min_width,
-                                    child->style.max_width)
-                       : (row ? sizes[i].width : sizes[i].height);
+        // flex_basis is a main-axis size: a column's main axis is height, so
+        // clamp against min/max_height (0.6 audit MINOR: width fields were
+        // used unconditionally).
+        const float basis_min = row ? child->style.min_width : child->style.min_height;
+        const float basis_max = row ? child->style.max_width : child->style.max_height;
+        const float main_margin = row ? child->style.margin.horizontal()
+                                      : child->style.margin.vertical();
+        // The slot includes the child's margin so the border box placed below
+        // resolves to the measured size (not measured - margin, which clipped
+        // the content and left trailing slack).
+        bases[i] = (child->style.flex_basis >= 0.0f
+                        ? clamp_value(child->style.flex_basis, basis_min, basis_max)
+                        : (row ? sizes[i].width : sizes[i].height)) + main_margin;
         used_main += bases[i];
         if (i + 1 < count) {
             used_main += gap;
@@ -209,7 +216,9 @@ void place_children(const ViewNode& node, const Rect& content,
         }
         const float child_main = std::max(0.0f, bases[i]);
         const SizeF measured = sizes[i];
-        float child_cross = row ? measured.height : measured.width;
+        const float cross_margin = row ? child->style.margin.vertical()
+                                       : child->style.margin.horizontal();
+        float child_cross = (row ? measured.height : measured.width) + cross_margin;
         float cross_offset = 0.0f;
         switch (node.style.align_items) {
             case Align::stretch:

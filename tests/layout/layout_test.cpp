@@ -190,6 +190,66 @@ void test_solver() {
     }
 }
 
+void test_layout_regressions() {
+    using namespace continui;
+    FakeMeasurer measurer;
+    const Constraints loose{};
+
+    // --- child margin contributes to intrinsic container size ----------
+    {
+        FrameArena arena;
+        Style child;
+        child.margin = {5, 7, 5, 7};  // horizontal 10, vertical 14
+        const View root = Column(arena, {Solid(arena, child)}, Style{});
+        const auto result = solve(root, loose, measurer);
+        check(approx(result.root_bounds.width, 10.0f)
+              && approx(result.root_bounds.height, 14.0f),
+              "child margin is included in intrinsic container size");
+    }
+
+    // --- margin-inclusive slot: child keeps its measured border box -------
+    {
+        FrameArena arena;
+        Style child;
+        child.margin = {5, 0, 5, 0};  // horizontal 10
+        const View root = Row(arena, {Text(arena, "AB", child)}, Style{});
+        const auto result = solve(root, loose, measurer);
+        check(approx(result.root_bounds.width, 26.0f),
+              "container intrinsic width includes child margin");
+        check(approx(result.boxes[1].bounds.width, 16.0f),
+              "child keeps its measured width inside a margin-inclusive slot");
+        check(approx(result.boxes[1].bounds.x, 5.0f),
+              "child margin offsets it inside its slot");
+    }
+
+    // --- min/max applied once on the border box, not doubled by padding -
+    {
+        FrameArena arena;
+        Style style;
+        style.min_width = 100;
+        style.padding = {20, 0, 20, 0};  // horizontal 40
+        const View root = Text(arena, "AB", style);  // intrinsic width 16
+        const auto result = solve(root, loose, measurer);
+        check(approx(result.root_bounds.width, 100.0f),
+              "auto size clamps min-width once on the border box");
+    }
+
+    // --- column flex_basis clamps against height, not width -------------
+    {
+        FrameArena arena;
+        Style column;
+        column.height = 200;
+        Style basis;
+        basis.flex_basis = 80;
+        basis.min_height = 120;  // must lift the basis to 120
+        basis.min_width = 1000;  // must NOT affect a column's main axis
+        const View root = Column(arena, {Solid(arena, basis)}, column);
+        const auto result = solve(root, loose, measurer);
+        check(approx(result.boxes[1].bounds.height, 120.0f),
+              "column flex_basis uses min/max_height for its main axis");
+    }
+}
+
 void test_invalidation() {
     using continui::Invalidation;
     using continui::merge_invalidation;
@@ -213,6 +273,7 @@ int main() {
     test_arena();
     test_arena_growth_across_frames();
     test_solver();
+    test_layout_regressions();
     test_invalidation();
     if (failures == 0) {
         std::println("layout tests passed");

@@ -42,8 +42,6 @@ style 提供纯值类型：`Color`、`Edges`、`Align`、`Justify`、`Style`。�
 ## 已知限制
 
 - 无 `Length` 单位、百分比、auto margin、inherit/theme
-- `flex_basis` 的钳制目前用 `min_width/max_width`（`layout_solver.cpp:135` 附近），对 Column 容器语义上应该用 `min_height/max_height` —— 这是已知待修问题，见 `09-traceability.md`
-- margin 参与子节点的摆放，但 `measure_children` 未把子节点 margin 计入容器固有尺寸，极端 margin 可能溢出容器
 
 ## 验证入口
 
