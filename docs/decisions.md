@@ -27,6 +27,8 @@
 | ADR-015 | 全平台 IME 支持 | Accepted |
 | ADR-016 | 逻辑像素作为公共布局单位 | Accepted |
 | ADR-017 | 构建体系以 CMake 为唯一正式支持；自研 cizon2 暂不接入 | Accepted |
+| ADR-018 | App/Window 实现置于 platform 模块（Win32 优先），公共契约留在 core 头文件 | Accepted |
+| ADR-019 | Phase 0.2 异常边界：事件回调异常传播到 run()/run_one_frame() 的调用方，泵内不捕获 | Accepted |
 
 ### ADR 规范
 
