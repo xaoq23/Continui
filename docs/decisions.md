@@ -18,7 +18,7 @@
 | ADR-006 | Key 寻址控件身份和局部状态 | Accepted |
 | ADR-007 | GPU Batch Rendering | Accepted |
 | ADR-008 | Canvas 作为高频绘制叶节点 | Accepted |
-| ADR-009 | Dawn 作为首个图形后端 | Proposed |
+| ADR-009 | Dawn 作为首个图形后端 | Accepted |
 | ADR-010 | HarfBuzz + FreeType 文本系统 | Proposed |
 | ADR-011 | Channel 作为跨线程业务数据入口 | Accepted |
 | ADR-012 | Channel 底层采用无锁队列 | TBD |
@@ -29,6 +29,7 @@
 | ADR-017 | 构建体系以 CMake 为唯一正式支持；自研 cizon2 暂不接入 | Accepted |
 | ADR-018 | App/Window 实现置于 platform 模块（Win32 优先），公共契约留在 core 头文件 | Accepted |
 | ADR-019 | Phase 0.2 异常边界：事件回调异常传播到 run()/run_one_frame() 的调用方，泵内不捕获 | Accepted |
+| ADR-020 | 主力工具链 clang++（MSVC ABI），cl.exe 作周期性对照，不支持 MinGW ABI | Accepted |
 
 ### ADR 规范
 
