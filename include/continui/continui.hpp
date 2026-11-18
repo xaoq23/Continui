@@ -16,3 +16,8 @@
 #include <continui/painter.hpp>
 #include <continui/font.hpp>
 #include <continui/glyph_run.hpp>
+#include <continui/layout.hpp>
+#include <continui/ui.hpp>
+#include <continui/view.hpp>
+#include <continui/arena.hpp>
+#include <continui/invalidation.hpp>

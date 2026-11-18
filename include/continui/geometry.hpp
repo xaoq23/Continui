@@ -30,6 +30,22 @@ constexpr bool operator==(const Rect& lhs, const Rect& rhs) noexcept {
            && lhs.height == rhs.height;
 }
 
+// Axis-aligned inset distances (padding/margin) in float pixels.
+struct Edges {
+    float left = 0;
+    float top = 0;
+    float right = 0;
+    float bottom = 0;
+
+    [[nodiscard]] constexpr float horizontal() const noexcept { return left + right; }
+    [[nodiscard]] constexpr float vertical() const noexcept { return top + bottom; }
+};
+
+constexpr bool operator==(const Edges& lhs, const Edges& rhs) noexcept {
+    return lhs.left == rhs.left && lhs.top == rhs.top && lhs.right == rhs.right
+           && lhs.bottom == rhs.bottom;
+}
+
 // A point in the same float-pixel domain as Rect (y grows downward). Used
 // for glyph origins; the integer event-domain Point stays in events.hpp.
 struct PointF {
