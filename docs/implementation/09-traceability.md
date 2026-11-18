@@ -62,11 +62,30 @@
 | 发现 | 证据 | 修复 | 代码位置 |
 |---|---|---|---|
 | **CRITICAL：FrameArena 原地替换仍被占用的块 → use-after-free** | `arena.hpp:117` 的 `blocks_[current_] = std::move(block)` 释放了本帧仍持有 ViewNode 和析构登记的块；审计员用 25 节点树在第 2/3 帧复现 0xC0000005；现有测试树太小（<4 KiB）从未覆盖 | 永不替换已占用块，改为在末尾追加新块并推进 `current_`；新增"400 个非平凡对象 × 4 帧"回归测试 | `arena.hpp:114` 附近、`tests/layout/layout_test.cpp::test_arena_growth_across_frames` |
-| MINOR：重复显式 Key 静默覆盖回调 | `ui.cpp:79` 用 `operator[]`；架构 §4.3 要求重复 Key 必须检测 | 记入已知限制（0.8 处理） | `ui.cpp:79` |
-| MINOR：resize 不触发 UI 失效 → 命中旧几何 | 事件处理器只处理 mouse_button_up | 记入已知限制（Resize 阶段处理；示例可用 `invalidate(layout)`） | `ui.cpp:152`、`examples/counter/main.cpp` |
-| MINOR：`flex_basis` 在 Column 上仍用 width 的 min/max 钳制 | `layout_solver.cpp:148` | 记入已知限制（已在 `02-style.md`/`03-layout.md` 记录） | `layout_solver.cpp:148` |
-| MINOR：固有尺寸漏算子节点 margin；min/max 与 padding 重复钳制 | `layout_solver.cpp:54–99` | 记入已知限制 | 同上 |
-| INFO：`solve()` 写 `ViewNode::index`；hit_test 注释与实现不符；setter 不自动失效 | 代码审查 | 文档化（确定性不受影响；按钮优先规则未实现，已修正注释预期） | `layout_solver.cpp:113`、`layout.hpp:54`、`ui.cpp:143` |
+| MINOR：重复显式 Key 静默覆盖回调 | `ui.cpp:79` 用 `operator[]`；架构 §4.3 要求重复 Key 必须检测 | **已修**（保留先登记者 + stderr 诊断） | `ui.cpp:78` 附近 |
+| MINOR：resize 不触发 UI 失效 → 命中旧几何 | 事件处理器只处理 mouse_button_up | **已修**（`paint` 检测 viewport 变化 → `invalidate(layout)`） | `ui.cpp:152` |
+| MINOR：`flex_basis` 在 Column 上仍用 width 的 min/max 钳制 | `layout_solver.cpp:148` | **已修**（按主轴选 min/max 字段） | `layout_solver.cpp:148` 附近 |
+| MINOR：固有尺寸漏算子节点 margin；min/max 与 padding 重复钳制 | `layout_solver.cpp:54–99` | **已修**（margin 计入固有尺寸；min/max 只在 border-box 上钳一次） | `layout_solver.cpp:54–99` |
+| INFO：`solve()` 写 `ViewNode::index`；hit_test 注释与实现不符；setter 不自动失效 | 代码审查 | 注释/文档已修；setter **已修**（`invalidate(layout)`）；`index` 帧内缓存保留 | `layout_solver.cpp:113`、`layout.hpp:54`、`ui.cpp:143` |
+
+### A 阶段：审计残留 MINOR 清理（已修，2026-11-18）
+
+| 项 | 改动 | 回归测试 |
+|---|---|---|
+| resize 失效 | `UI::paint` 比较传入 viewport 与缓存值；变化则 `invalidate(layout)` 并重算 | `ui_test.cpp`：小视口 200→500，断言根盒 200→300 |
+| 重复 Key | `callbacks.emplace` 替代 `operator[]`；重复时输出 stderr 诊断并保留先登记者 | `ui_test.cpp`：两个 Key{9} 按钮，断言首个回调触发、第二个不触发 |
+| Column flex_basis | 主轴为 Column 时用 `min_height/max_height` 钳制 | `layout_test.cpp`：basis=80 + min_height=120 + min_width=1000 → 120 |
+| 固有尺寸 margin | `measure_children` 计入子节点 main/cross margin；`place_children` 的 `bases[i]`/`child_cross` 同样含 margin，使测量与摆放一致 | `layout_test.cpp`：margin 5/7 → 容器 10×14；margin 10 + 文字 16 → 子盒 16 @ x=5 |
+| min/max 与 padding | 合并 `apply_style_size` 入 `measure`，auto 先加 padding 再钳一次 | `layout_test.cpp`：min_width=100 + padding 40 + 内容 16 → 100（原 140） |
+| setter 失效 | `set_font`/`set_text_measurer` 调用 `invalidate(layout)` | `ui_test.cpp`：两次 setter 后断言 pending==layout |
+
+验证：clang 7/7、MSVC 6/6，双工具链无编译警告；`ui_test` stderr 可见重复 Key 诊断。
+
+**独立 review 处置**：fresh-context review 子代理确认 5 项均已验真——把新测试链接到旧版 `layout_solver.cpp`/`ui.cpp` 时，3 个布局断言与 4 个 UI 断言全部失败，排除了 pass-while-wrong；无 CRITICAL/MAJOR、无架构/所有权/确定性违规。发现 2 项：
+- [MINOR] margin 修复不完整：`measure_children` 计入 margin，但 `place_children` 仍按无 margin 的 `bases[i]` 分配槽位并再次扣减 margin。复现（Row auto、文字 16×20、水平 margin 10）：旧代码子盒 6×20 @ x=5；首次修复后仍为 6×20，且容器多出 10px 尾部空白。**已接受并修正**：`bases[i]` 与 `child_cross` 均含 margin，测量与摆放使用同一基准；新增子盒 16 @ x=5 断言。
+- [INFO] 重复 Key 诊断因 `evaluate()` 每帧重建 callbacks 而每帧刷屏。**已接受并修正**：`UI::Impl` 用跨帧 `unordered_set<Key>` 记录已警告 Key，每个 Key 只打印一次。
+
+修正后重跑：clang 7/7、MSVC 6/6，无警告。**独立复核结论：Accept**——复核子代理用原复现程序确认子盒从 6×20 恢复为 16×20 @ x=5、容器 26×20 且无尾部空白；探针检查 flex grow/shrink、stretch/center、非对称 margin 均正确，Counter 布局未变；一次性诊断经 3 帧 × 2 个重复 Key 验证仅输出 2 行。残留 2 个 INFO：flex-shrink 权重含 margin（~0.2px 有界偏差，确定性，非缺陷）；`platform_window_test` 全套件下有偶发失败（未触及模块，pre-existing flakiness，单独运行 3/3 通过）。
 
 **修复后验证**：
 - `cmake --build --preset clang` + `ctest --preset clang` 7/7；MSVC 6/6
@@ -75,18 +94,26 @@
 
 **其他验证为干净**：公共头无第三方泄漏、`ui.hpp` 独立包含可编译、模块边界无环、0.4/0.5 无回退；Counter 三次独立截图均确认 42→41→42。
 
+### C 阶段：GPU 像素回读测试（已实现，2026-11-18）
+
+- **目标**：把 0.4（baseVertex 双重偏移）与 0.5（归一化 UV 当 quad 尺寸 → 0.03px 不可见文字）两类"测试全绿但画面错"的静默缺陷变成程序化断言。
+- **方案**：不动 backend/公共 API，仅在 `tests/backend/dawn_renderer_test.cpp` 用 Win32 GDI `PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT)` 把呈现后的窗口快照拷进内存 DC，`GetPixel` 读客户区像素。实验确认 `GetDC(hwnd)` 读到的是 DWM 背景 `(30,30,40)`，不可用。
+- **断言**：全屏红色中心像素；两个 scissor 批次的红左/蓝右同时可见；`HELLO` 文字区域亮像素 > 50。
+- **时序**：DWM 合成滞后 `Present()` 1–2 帧，裸快照约 40% 读到旧帧；`readback_until` 每次 pump 一帧相同内容并重试，上限 8 次。修正后 20/20 连续通过。
+- **App 生命周期陷阱**：像素测试必须排在其他测试之前且不调用 `quit()`——`quit()` 投递线程全局 WM_QUIT，而 `App::run_one_frame()` 在 `quit_requested` 为真时直接返回、无法 drain，会污染后续 App。
+- **独立 review 结论：Accept after corrections**——bug 注入实验确认测试有效性：把 `dawn_renderer.cpp` 的 baseVertex 改回 `batch.vertex_offset` 后断言 (2) 3/3 失败；把 `batcher.cpp` 的 quad 尺寸改回归一化 UV 后断言 (3) 3/3 失败；还原后基线全过。20/20 连续运行无 flake。修正 2 个 MINOR（早退分支不 `quit()`、文件头注释更新）后重跑 clang 7/7。
+- **覆盖限制 [INFO]**：`default`（MSVC）preset 未开启 `CONTINUI_BUILD_BACKEND_DAWN`，backend 测试仅在 `clang` preset 注册；像素回读断言目前只有 clang 背书。GDI 读回是 Win32 API，编译器差异影响有限；如需 MSVC 背书需单独配置 DAWN ON 的 MSVC 构建。
+
 ## 3. 已知问题登记（未修，但已记录）
 
 | 问题 | 影响 | 归属阶段 | 代码位置 |
 |---|---|---|---|
-| `flex_basis` 钳制用 `min_width/max_width`，Column 应用 height | 纵向 flex_basis 可能被横向约束错误钳制 | 待修（0.6 后续） | `layout_solver.cpp:135` 附近 |
-| 自动 Key 是位置序，重复 Key 未检测 | 列表重排/重复 Key 时身份错乱；违反架构 §4.3 规则 3 | 0.8 | `arena.hpp` / `view_tree.cpp` |
+| 自动 Key 是位置序；按钮回调层已检测重复 Key，节点级重复未强制唯一 | 列表重排时身份错乱；违反架构 §4.3 规则 3 的严格形式 | 0.8 | `arena.hpp` / `view_tree.cpp` |
 | 无 Tree Diff / 脏区分级；任何失效整树重算 | 性能问题，不是正确性问题 | 0.8 | `ui.cpp:152` |
-| 事件使用上一帧布局 | resize 后首帧点击可能命中旧几何 | 0.8 / 输入阶段 | `ui.cpp:164` |
+| 事件使用上一帧布局 | resize 当帧的点击仍命中旧几何（resize 已在 paint 时触发重算，但事件先于 paint 泵出） | 0.8 / 输入阶段 | `ui.cpp:164` |
 | 字体路径仅 ASCII；TTC 取 face 0 | Unicode 路径/字体集合受限 | 后续平台阶段 | `font_manager.cpp:101` |
 | 图集无淘汰，上限 2048；无 fallback 链 | 大字数/多语言缺字 | 0.7+ | `glyph_cache.cpp:110` |
 | uint16 索引上限 16384 quads/帧，超出静默丢弃 | 文本密集帧可能丢字 | 后续（u32 索引） | `batcher.cpp:70` |
-| 无 GPU 像素回读 | 只能靠目视/截图 + CPU 契约测试 | 后续 | `tests/backend/` |
 | HWND 复用 / display-mode 变化 stale surface | 多窗口/DPI 阶段处理 | 后续 | `dawn_renderer.cpp:853` |
 
 ## 4. 测试矩阵
@@ -98,9 +125,9 @@
 | `tests/render/ui_test.cpp` | ui.cpp | 命中→回调→失效→重绘，回调不重入，外部点击忽略 |
 | `tests/layout/layout_test.cpp` | arena + solver + invalidation | 生命周期、gap/padding/flex/对齐/钳制/命中/合并 |
 | `tests/text/text_test.cpp` | text 模块 | shaping、metrics、图集增长、512px 单次增长 |
-| `tests/backend/dawn_renderer_test.cpp` | 全 GPU 路径 | bring-up、纹理、painted 帧、增长负载、resize、uncaptured error |
+| `tests/backend/dawn_renderer_test.cpp` | 全 GPU 路径 | bring-up、纹理、painted 帧、增长负载、resize、uncaptured error；GDI 像素回读（纯色/跨批次/文字亮像素） |
 
-**已知盲区**：没有任何 GPU 像素回读断言；0.4/0.5 的两次"全绿但画面错误"都靠截图实验发现。目视验收必须使用逐项检查清单。
+**像素验证现状**：backend 测试用 `PrintWindow(PW_RENDERFULLCONTENT)` 读回客户区像素，断言纯色、双 scissor 批次、文字亮像素；因 DWM 合成滞后，`readback_until` 带 8 次有界重试。0.4/0.5 的历史缺陷现在有程序化断言防线；目视验收仍建议使用逐项检查清单。
 
 ## 5. 提交地图
 

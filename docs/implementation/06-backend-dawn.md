@@ -63,13 +63,12 @@ reconfigure_if_resized（client size 轮询，0.3 interim）
 
 - client size 轮询（Phase 0.3 interim）：HWND 复用、display-mode 变化的 stale surface 未处理
 - 单窗口；多窗口/DPI 待后续
-- 无像素回读（测试靠 CPU 契约 + 目视/截图 + uncaptured error 断言）
+- GPU surface 无 `COPY_SRC`；程序化像素验证走测试侧 `PrintWindow(PW_RENDERFULLCONTENT)` GDI 快照（见 `tests/backend/dawn_renderer_test.cpp`），不改 backend/公共 API
 - uint16 索引上限 16384 quads/帧
-- surface usage 无 COPY_SRC，无法程序化读回
 
 ## 验证入口
 
-`tests/backend/dawn_renderer_test.cpp`：真实窗口 bring-up、纹理上传（含非法输入）、painted 帧 + 文本增长负载、真实 SetWindowPos resize、teardown、uncaptured-error 断言。`examples/shapes/text/counter` 目视。
+`tests/backend/dawn_renderer_test.cpp`：真实窗口 bring-up、纹理上传（含非法输入）、painted 帧 + 文本增长负载、真实 SetWindowPos resize、teardown、uncaptured-error 断言，以及 GDI 像素回读断言（纯色、跨批次、文字亮像素）。`examples/shapes/text/counter` 目视。
 
 ## 溯源
 
