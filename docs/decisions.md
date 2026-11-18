@@ -19,7 +19,7 @@
 | ADR-007 | GPU Batch Rendering | Accepted |
 | ADR-008 | Canvas 作为高频绘制叶节点 | Accepted |
 | ADR-009 | Dawn 作为首个图形后端 | Accepted |
-| ADR-010 | HarfBuzz + FreeType 文本系统 | Proposed |
+| ADR-010 | HarfBuzz + FreeType 文本系统 | Accepted |
 | ADR-011 | Channel 作为跨线程业务数据入口 | Accepted |
 | ADR-012 | Channel 底层采用无锁队列 | TBD |
 | ADR-013 | Flex 算法参考 Taffy | Proposed |

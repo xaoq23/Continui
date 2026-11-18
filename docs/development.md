@@ -154,7 +154,7 @@ continui
 
 验收：绘制多个 UI 基础图形；减少不必要的 Draw Call；基础混合和裁剪正确。
 
-**0.5 文本渲染**
+**0.5 文本渲染** — Implemented
 
 - 接入 FreeType，建立 Glyph Atlas。
 - 接入 HarfBuzz，绘制拉丁字符。
