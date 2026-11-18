@@ -171,6 +171,15 @@ void App::run_one_frame() {
             return;  // the last window may have closed mid-drain
         }
     }
+    if (impl_->frame_callback) {
+        impl_->frame_callback();
+    }
+}
+
+void App::set_frame_callback(FrameCallback callback) {
+    if (impl_ != nullptr) {
+        impl_->frame_callback = std::move(callback);
+    }
 }
 
 bool App::running() const {

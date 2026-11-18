@@ -13,6 +13,18 @@ namespace detail {
 struct WindowImpl;
 }
 
+// Forward declarations so the platform-layer accessor can be declared
+// before the class definition and friended inside it.
+class Window;
+
+// Defined in the platform layer (platform_window.cpp); the controlled
+// consumer-facing declaration is <continui/platform_windows.hpp>. Window
+// grants this function friendship so it can return the native handle
+// without widening the public Window API.
+namespace platform_windows {
+void* native_window_handle(const Window& window);
+}
+
 enum class WindowError {
     invalid_desc,       // non-positive client width/height
     creation_failed,    // the platform rejected the window
@@ -52,6 +64,7 @@ public:
 
 private:
     friend class App;
+    friend void* platform_windows::native_window_handle(const Window&);
     explicit Window(detail::WindowImpl* impl) : impl_(impl) {}
 
     detail::WindowImpl* impl_ = nullptr;

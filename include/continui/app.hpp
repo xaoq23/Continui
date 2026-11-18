@@ -12,6 +12,7 @@
 #include <continui/window.hpp>
 
 #include <expected>
+#include <functional>
 #include <memory>
 
 namespace continui {
@@ -23,6 +24,8 @@ struct AppImpl;
 enum class AppError {
     platform_init_failed,
 };
+
+using FrameCallback = std::function<void()>;
 
 class App {
 public:
@@ -42,9 +45,16 @@ public:
     // closes. Returns 0.
     int run();
 
-    // Drives one non-blocking pump cycle (drains pending messages). Embed
-    // this in an external loop; keep calling while running() is true.
+    // Drives one non-blocking pump cycle (drains pending messages), then
+    // invokes the frame callback once. Embed this in an external loop; keep
+    // calling while running() is true.
     void run_one_frame();
+
+    // Registers a callback invoked once per run_one_frame() call, after
+    // events are pumped (one tick per frame). The GPU renderer registers
+    // itself here. Phase 0.3 constraint: the managed run() loop does not
+    // tick frame callbacks — GPU apps drive the loop via run_one_frame().
+    void set_frame_callback(FrameCallback callback);
 
     // True while run()/run_one_frame() should keep going: at least one live
     // window and quit() not called. Main thread only.

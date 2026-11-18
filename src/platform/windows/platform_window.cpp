@@ -4,6 +4,7 @@
 #include "internal.hpp"
 
 #include <continui/app.hpp>
+#include <continui/platform_windows.hpp>
 #include <continui/window.hpp>
 
 #include <cstdint>
@@ -234,3 +235,11 @@ bool Window::valid() const {
 }
 
 }  // namespace continui
+
+namespace continui::platform_windows {
+
+void* native_window_handle(const Window& window) {
+    return window.impl_ != nullptr ? static_cast<void*>(window.impl_->hwnd) : nullptr;
+}
+
+}  // namespace continui::platform_windows

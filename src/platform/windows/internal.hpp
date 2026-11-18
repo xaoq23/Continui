@@ -35,6 +35,7 @@ struct WindowImpl {
 struct AppImpl {
     HINSTANCE instance = nullptr;
     std::vector<std::unique_ptr<WindowImpl>> windows;
+    std::function<void()> frame_callback;
     bool quit_requested = false;
 
     bool has_active_windows() const {
