@@ -38,13 +38,17 @@ add_subdirectory(src/platform)
 # The umbrella target users link against. The platform module joined in
 # Phase 0.2 (Win32). The Dawn backend (Phase 0.3) is deliberately NOT in the
 # umbrella: it is opt-in, so consumers without GPU needs do not pay for Dawn.
-# The opt-in Dawn backend pulls continui_render in transitively; the text
-# module joins the umbrella with its Phase 0.5 implementation.
+# The opt-in Dawn backend needs no umbrella entry: it is opt-in, so consumers
+# without GPU needs do not pay for Dawn. The render module (Painter) joins
+# here — without it, a consumer linking only `continui` gets undefined Painter
+# symbols; examples currently mask that because backend_dawn PRIVATE-links
+# continui_render. text joins with its Phase 0.5 implementation.
 add_library(continui INTERFACE)
 target_link_libraries(continui INTERFACE
     continui_core
     continui_style
     continui_layout
+    continui_render
     continui_platform
     continui_text
 )
