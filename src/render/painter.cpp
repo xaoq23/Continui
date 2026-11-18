@@ -22,6 +22,12 @@ void Painter::image(const Texture& texture, const Rect bounds) {
     batches_->image(texture.id_, bounds);
 }
 
+void Painter::text(const GlyphRun& run, const PointF origin, const Paint& paint) {
+    if (text_ != nullptr) {
+        batches_->text(run, origin, paint, *text_);
+    }
+}
+
 void Painter::clip(const Rect bounds) {
     batches_->clip(bounds);
 }

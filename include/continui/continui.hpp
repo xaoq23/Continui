@@ -14,3 +14,5 @@
 #include <continui/window.hpp>
 #include <continui/channel.hpp>
 #include <continui/painter.hpp>
+#include <continui/font.hpp>
+#include <continui/glyph_run.hpp>

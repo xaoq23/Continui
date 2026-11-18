@@ -30,6 +30,21 @@ constexpr bool operator==(const Rect& lhs, const Rect& rhs) noexcept {
            && lhs.height == rhs.height;
 }
 
+// A point in the same float-pixel domain as Rect (y grows downward). Used
+// for glyph origins; the integer event-domain Point stays in events.hpp.
+struct PointF {
+    float x = 0;
+    float y = 0;
+
+    [[nodiscard]] constexpr PointF operator+(const PointF& other) const noexcept {
+        return PointF{x + other.x, y + other.y};
+    }
+};
+
+constexpr bool operator==(const PointF& lhs, const PointF& rhs) noexcept {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
 // Corner radii for rounded rectangles, one per corner so single-side
 // rounding works without extra APIs. Values larger than half the rect's
 // shortest extent are clamped by the batcher, not rejected.

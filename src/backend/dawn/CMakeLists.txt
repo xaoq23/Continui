@@ -55,12 +55,16 @@ target_compile_features(continui_backend_dawn PUBLIC cxx_std_23)
 # through <continui/platform_windows.hpp> (backend -> platform, no cycle).
 # PRIVATE continui_render: the renderer consumes the paint phase's batches
 # (backend -> render, no cycle); the batcher header stays internal to it.
+# PRIVATE continui_text: the renderer owns the glyph strike cache/atlas and
+# implements the batcher's narrow TextRasterContext (backend -> text, no
+# cycle); text never sees Dawn.
 target_link_libraries(continui_backend_dawn
     PUBLIC continui_core dawn::webgpu_dawn
-    PRIVATE continui_platform continui_render
+    PRIVATE continui_platform continui_render continui_text
 )
-# The batcher header is internal to render; the backend gets a private
-# include path for it instead of render widening its own INTERFACE dirs.
+# The batcher and text headers are internal to their modules; the backend
+# gets private include paths instead of either widening its INTERFACE dirs.
 target_include_directories(continui_backend_dawn PRIVATE
     "${CMAKE_SOURCE_DIR}/src/render"
+    "${CMAKE_SOURCE_DIR}/src/text"
 )

@@ -1,4 +1,5 @@
 add_subdirectory(core)
 add_subdirectory(platform)
 add_subdirectory(render)
+add_subdirectory(text)
 add_subdirectory(backend)

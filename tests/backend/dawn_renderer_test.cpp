@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <vector>
 
 namespace {
@@ -79,11 +80,36 @@ int check_renderer_lifecycle() {
                        .valid(),
                   "wrong byte count rejected");
 
+            // Phase 0.5: shape a few latin runs on a real font (skip the
+            // text path on machines without a system font). The many sizes
+            // below overflow the 256px atlas, exercising texture replacement
+            // and full re-upload on growth through the GPU path.
+            FontManager fonts;
+            std::vector<GlyphRun> runs;
+#ifdef _WIN32
+            const std::filesystem::path font_path = "C:/Windows/Fonts/segoeui.ttf";
+#else
+            const std::filesystem::path font_path =
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+            const FontFace* face = nullptr;
+            if (std::filesystem::exists(font_path)) {
+                const auto loaded = fonts.load_file(font_path);
+                if (loaded) {
+                    face = *loaded;
+                    runs.push_back(face->shape("Hello, glyph atlas!", 18.0f));
+                    for (int size = 12; size <= 24; ++size) {
+                        runs.push_back(face->shape("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                                                   static_cast<float>(size)));
+                    }
+                }
+            }
+
             // Painted frames: shapes, a translucent overlap, the texture,
-            // and a clip switch — the batched pipeline must swallow all of
-            // it. Programmatic error check: any uncaptured GPU error
-            // (validation, shader) since create() fails these assertions.
-            renderer->set_paint_callback([&window, texture](Painter& painter) {
+            // text runs, and a clip switch — the batched pipeline must
+            // swallow all of it. Programmatic error check: any uncaptured
+            // GPU error (validation, shader, atlas upload) fails.
+            renderer->set_paint_callback([&window, texture, face, &runs](Painter& painter) {
                 const Size client = window->client_size();
                 painter.rect({0, 0, static_cast<float>(client.width),
                               static_cast<float>(client.height)},
@@ -92,6 +118,16 @@ int check_renderer_lifecycle() {
                 painter.rounded_rect({150, 10, 120, 80}, Radius::top(24),
                                      {Color::rgba(60, 90, 230, 160)});
                 painter.image(texture, {10, 100, 80, 40});
+
+                if (face != nullptr) {
+                    painter.text(runs[0], {20, 150}, {Color::rgb(245, 245, 245)});
+                    for (std::size_t i = 1; i < runs.size(); ++i) {
+                        painter.text(runs[i],
+                                     {20.0f + static_cast<float>(i % 4) * 0.25f,
+                                      static_cast<float>(60 + (i - 1) * 12)},
+                                     {Color::rgb(210, 220, 240)});
+                    }
+                }
 
                 // Clipped stripes must not crash or leak outside the clip.
                 painter.clip({300, 10, 100, 100});

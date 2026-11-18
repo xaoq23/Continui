@@ -25,6 +25,8 @@
 #include <continui/platform_windows.hpp>
 
 #include "batcher.hpp"
+#include "glyph_cache.hpp"
+#include "text_context.hpp"
 #include "dawn/webgpu_cpp.h"
 
 // min/max macros would poison the Dawn headers and the std:: usage below.
@@ -126,6 +128,19 @@ constexpr char kQuadShader[] = R"(
         color *= coverage;
         return color * in.tint;
     }
+
+    // Phase 0.5 text: the atlas texel's alpha IS the glyph coverage — no
+    // shape SDF, whose edge fade would eat the outermost glyph pixels.
+    // Contrast comes from the ink luminance (Impeller: 1 + luma * max in
+    // the CPU stage, then 1 - (1-coverage)^contrast here). The white mask
+    // (255,255,255,c) becomes premultiplied (c,c,c,c), then tint multiplies.
+    @fragment
+    fn fs_text(in : VertexOut) -> @location(0) vec4f {
+        let mask = textureSample(tex, samp, in.uv).a;
+        let contrast = max(in.radius.x, 1.0);
+        let coverage = 1.0 - pow(1.0 - mask, contrast);
+        return vec4f(coverage, coverage, coverage, coverage) * in.tint;
+    }
 )";
 
 // wgpu::StringView bytes are not guaranteed NUL-terminated; copy before
@@ -152,9 +167,13 @@ void on_uncaptured_error(const wgpu::Device&, wgpu::ErrorType, wgpu::StringView 
 // One Dawn bring-up for one window. All members are main-thread-only; the
 // owning Renderer must die before the App (its destructor unregisters the
 // App frame callback first, keeping the callback pointer valid until then).
-class DawnRendererImpl {
+class DawnRendererImpl final : public TextRasterContext {
 public:
-    DawnRendererImpl() = default;
+    DawnRendererImpl() {
+        // Growth can happen mid-paint; flush pending pixels to the old atlas
+        // texture before the strike cache rebuilds (see GlyphCache).
+        glyph_cache_.set_before_growth_flush([this] { sync_atlas(); });
+    }
 
     DawnRendererImpl(const DawnRendererImpl&) = delete;
     DawnRendererImpl& operator=(const DawnRendererImpl&) = delete;
@@ -168,6 +187,7 @@ public:
         // texture map / buffers / bind groups release before device_ does
         // (member declaration order), so their last references die first.
         pipeline_ = nullptr;
+        text_pipeline_ = nullptr;
         textures_.clear();
         white_bind_group_ = nullptr;
         white_view_ = nullptr;
@@ -193,6 +213,34 @@ public:
     }
 
     bool had_uncaptured_errors() const { return error_seen_; }
+
+    // TextRasterContext: resolves a glyph into normalized atlas UVs. A
+    // growth rebuild swaps the GPU texture here (before the quad records
+    // its id); older quads this frame keep the old id and UVs, which stay
+    // valid because textures live until the renderer dies.
+    GlyphSlot glyph(const FontFace& face, const float size_px, const int x_bucket,
+                    const std::uint32_t glyph_id) override {
+        const auto entry = glyph_cache_.glyph(face, size_px, x_bucket, glyph_id);
+        if (!entry) {
+            return {};
+        }
+        if (atlas_id_ == 0
+            || glyph_cache_.generation() != atlas_generation_) {
+            create_atlas_texture();
+        }
+        if (atlas_id_ == 0) {
+            return {};  // texture creation failed; uncaptured error is set
+        }
+        const float width = static_cast<float>(glyph_cache_.atlas().width());
+        const float height = static_cast<float>(glyph_cache_.atlas().height());
+        return GlyphSlot{Rect{entry->uv_px.x / width, entry->uv_px.y / height,
+                              entry->uv_px.width / width,
+                              entry->uv_px.height / height},
+                         entry->left, entry->top, entry->uv_px.width,
+                         entry->uv_px.height};
+    }
+
+    std::uint64_t atlas_texture() const override { return atlas_id_; }
 
     std::expected<void, GpuError> initialize(App& app, const Window& window) {
         app_ = &app;
@@ -323,6 +371,78 @@ public:
         return Texture{id, size};
     }
 
+    // Creates the atlas texture on first glyph, and a NEW one whenever the
+    // strike cache grows/rebuilds. create_texture() uploads the whole CPU
+    // atlas immediately, so the rebuild's full dirty rect is consumed here.
+    // Old ids stay registered (renderer-lifetime textures), so quads
+    // recorded earlier in this frame still sample valid pixels.
+    void create_atlas_texture() {
+        const GlyphAtlas& atlas = glyph_cache_.atlas();
+        const Size size{atlas.width(), atlas.height()};
+        const std::size_t bytes = static_cast<std::size_t>(size.width)
+                                  * static_cast<std::size_t>(size.height) * 4;
+        const Texture texture = create_texture(size, atlas.pixels(), bytes);
+        atlas_id_ = texture.id_;
+        atlas_generation_ = glyph_cache_.generation();
+        if (atlas_id_ != 0) {
+            (void)glyph_cache_.atlas().take_dirty();
+        }
+    }
+
+    // Pushes newly packed glyph pixels (union dirty rect) into the existing
+    // atlas texture before the frame is encoded. Growth never reaches here
+    // as a partial update: that path creates a fresh texture in full.
+    void sync_atlas() {
+        if (atlas_id_ == 0) {
+            return;
+        }
+        const Rect dirty = glyph_cache_.atlas().take_dirty();
+        if (dirty.empty()) {
+            return;
+        }
+        const auto it = textures_.find(atlas_id_);
+        if (it == textures_.end()) {
+            return;  // no texture: the uncaptured-error flag explains why
+        }
+        const int atlas_w = glyph_cache_.atlas().width();
+        const int atlas_h = glyph_cache_.atlas().height();
+        const int x = std::clamp(static_cast<int>(std::floor(dirty.x)), 0, atlas_w - 1);
+        const int y = std::clamp(static_cast<int>(std::floor(dirty.y)), 0, atlas_h - 1);
+        const int w = std::min(static_cast<int>(std::ceil(dirty.right())) - x,
+                               atlas_w - x);
+        const int h = std::min(static_cast<int>(std::ceil(dirty.bottom())) - y,
+                               atlas_h - y);
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+
+        const std::uint32_t row_bytes = static_cast<std::uint32_t>(w) * 4;
+        const std::uint32_t aligned_rows = (row_bytes + 255u) & ~255u;
+        std::vector<std::uint8_t> staged(
+            static_cast<std::size_t>(aligned_rows) * static_cast<std::size_t>(h));
+        const std::uint8_t* source = glyph_cache_.atlas().pixels();
+        const std::size_t atlas_stride = static_cast<std::size_t>(atlas_w) * 4;
+        for (int row = 0; row < h; ++row) {
+            std::memcpy(staged.data() + static_cast<std::size_t>(row) * aligned_rows,
+                        source + static_cast<std::size_t>(y + row) * atlas_stride
+                                 + static_cast<std::size_t>(x) * 4,
+                        row_bytes);
+        }
+
+        wgpu::TexelCopyTextureInfo destination{};
+        destination.texture = it->second.texture;
+        destination.origin = {static_cast<std::uint32_t>(x),
+                              static_cast<std::uint32_t>(y), 0};
+        wgpu::TexelCopyBufferLayout layout{};
+        layout.bytesPerRow = aligned_rows;
+        const wgpu::Extent3D extent{static_cast<std::uint32_t>(w),
+                                     static_cast<std::uint32_t>(h), 1};
+        queue_.WriteTexture(&destination, staged.data(), staged.size(), &layout,
+                            &extent);
+        // Validation failures surface through had_uncaptured_errors(), the
+        // same programmatic signal the backend tests assert on.
+    }
+
     // One presented frame. Steps that cannot proceed (moved-from, window
     // gone, minimized to zero area) leave the frame skipped, not an error:
     // a dropped frame is recoverable, a thrown exception is not. Paint
@@ -339,10 +459,13 @@ public:
         const Size viewport{configured_width_, configured_height_};
         batcher_.begin_frame(viewport);
         if (paint_callback_) {
-            Painter painter{batcher_};
+            Painter painter{batcher_, this};
             paint_callback_(painter);
         }
         batcher_.finish_frame();
+        // Glyphs packed during the paint callback need their pixels on the
+        // GPU before the draw encodes; full uploads happened at creation.
+        sync_atlas();
 
         const auto& vertices = batcher_.vertices();
         const auto& indices = batcher_.indices();
@@ -386,8 +509,9 @@ public:
 
         wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
         wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&pass_desc);
-        pass.SetPipeline(pipeline_);
         pass.SetBindGroup(0, screen_bind_group_);
+        BatchKind pipeline_kind = BatchKind::shape;
+        bool pipeline_set = false;
         // Bind geometry only when there is geometry: a bufferless frame
         // (no paint callback, nothing recorded) must stay a plain clear.
         if (!indices.empty()) {
@@ -395,6 +519,12 @@ public:
             pass.SetIndexBuffer(index_buffer_, wgpu::IndexFormat::Uint16);
         }
         for (const Batch& batch : batches) {
+            if (!pipeline_set || batch.kind != pipeline_kind) {
+                pass.SetPipeline(batch.kind == BatchKind::text ? text_pipeline_
+                                                               : pipeline_);
+                pipeline_kind = batch.kind;
+                pipeline_set = true;
+            }
             // Batcher scissors are viewport-clamped; integer-floored here so
             // the scissor rect covers the same pixels the SDF would fade in.
             const std::uint32_t sx = static_cast<std::uint32_t>(std::floor(batch.scissor.x));
@@ -573,6 +703,18 @@ private:
         }
         pipeline_ = device_.CreateRenderPipeline(&pipeline_desc);
         if (!pipeline_ || error_seen_) {
+            return false;
+        }
+
+        // Phase 0.5 text shares the vertex layout, bind groups, blending
+        // and blend state with shapes — only the fragment entry differs
+        // (white-mask coverage + gamma, no SDF). One extra pipeline, no
+        // extra vertex format and no shader permutation explosion.
+        fragment.entryPoint = "fs_text";
+        pipeline_desc.label = "continui-glyph-atlas";
+        pipeline_desc.fragment = &fragment;
+        text_pipeline_ = device_.CreateRenderPipeline(&pipeline_desc);
+        if (!text_pipeline_ || error_seen_) {
             return false;
         }
 
@@ -755,6 +897,7 @@ private:
     wgpu::Queue queue_;
     wgpu::Surface surface_;
     wgpu::RenderPipeline pipeline_;
+    wgpu::RenderPipeline text_pipeline_;
     wgpu::TextureFormat surface_format_ = wgpu::TextureFormat::Undefined;
     int configured_width_ = 0;
     int configured_height_ = 0;
@@ -763,6 +906,12 @@ private:
     // per-frame data stays hot across frames.
     BatchBuilder batcher_;
     std::function<void(Painter&)> paint_callback_;
+
+    // Phase 0.5 glyph cache: CPU strike map + atlas, owned here because the
+    // renderer also owns the GPU atlas texture(s) and uploads their pixels.
+    GlyphCache glyph_cache_;
+    std::uint64_t atlas_id_ = 0;         // 0 until the first glyph is drawn
+    std::uint64_t atlas_generation_ = 0; // generation backing atlas_id_
 
     // Presentation resources, created with the pipeline.
     wgpu::BindGroupLayout texture_bgl_;  // group 1, needed per bind group

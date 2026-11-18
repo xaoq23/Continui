@@ -31,19 +31,22 @@ add_subdirectory(src/core)
 add_subdirectory(src/style)
 add_subdirectory(src/layout)
 add_subdirectory(src/render)
+add_subdirectory(src/text)
 add_subdirectory(src/backend)
 add_subdirectory(src/platform)
 
 # The umbrella target users link against. The platform module joined in
 # Phase 0.2 (Win32). The Dawn backend (Phase 0.3) is deliberately NOT in the
 # umbrella: it is opt-in, so consumers without GPU needs do not pay for Dawn.
-# render joins when Painter/draw batches land (Phase 0.4).
+# The opt-in Dawn backend pulls continui_render in transitively; the text
+# module joins the umbrella with its Phase 0.5 implementation.
 add_library(continui INTERFACE)
 target_link_libraries(continui INTERFACE
     continui_core
     continui_style
     continui_layout
     continui_platform
+    continui_text
 )
 target_compile_features(continui INTERFACE cxx_std_23)
 

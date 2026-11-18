@@ -3,6 +3,7 @@
 // test framework choice is deferred; must not depend on <cassert> so a
 // Release run stays meaningful).
 #include "batcher.hpp"
+#include "text_context.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -10,8 +11,24 @@
 #include <vector>
 
 using continui::detail::BatchBuilder;
+using continui::detail::BatchKind;
+using continui::detail::GlyphSlot;
+using continui::detail::TextRasterContext;
 
 namespace {
+
+// A glyph with a 10x14px bitmap parked at (8,16) in a 256px atlas. The
+// normalized uv extent is ~0.04; the quad must still be 10x14 PIXELS.
+class FakeTextContext final : public TextRasterContext {
+public:
+    GlyphSlot glyph(const continui::FontFace&, const float, const int,
+                    const std::uint32_t) override {
+        return GlyphSlot{continui::Rect{8.0f / 256.0f, 16.0f / 256.0f,
+                                        10.0f / 256.0f, 14.0f / 256.0f},
+                         2.0f, 12.0f, 10.0f, 14.0f};
+    }
+    std::uint64_t atlas_texture() const override { return 42; }
+};
 
 int failures = 0;
 
@@ -244,6 +261,33 @@ int main() {
         check(b.batches().size() == 1
                   && b.batches()[0].scissor == Rect{0, 0, 1024, 768},
               "begin_frame restores the full-viewport scissor");
+    }
+
+    // --- text quads: pixel size from glyph bitmaps, uv normalized ----------
+    {
+        BatchBuilder b;
+        b.begin_frame(Size{800, 600});
+        FakeTextContext context;
+        continui::GlyphRun run;
+        const int dummy = 0;
+        run.face = reinterpret_cast<const continui::FontFace*>(&dummy);
+        run.size_px = 16.0f;
+        run.glyphs.push_back(continui::Glyph{65, 8.0f, 0.0f, 0.0f});
+        b.text(run, {100.0f, 200.0f}, Paint{Color::rgb(255, 255, 255)}, context);
+        b.finish_frame();
+
+        check(b.batches().size() == 1 && b.batches()[0].kind == BatchKind::text,
+              "text records a dedicated pipeline batch");
+        check(b.batches()[0].texture_id == 42, "text batch binds the atlas texture");
+        check(b.vertices().size() == 4, "one glyph -> one quad");
+        const auto& v = b.vertices();
+        check(approx(v[0].x, 102.0f) && approx(v[0].y, 188.0f),
+              "glyph quad honors pixel bearings around the baseline");
+        check(approx(v[1].x - v[0].x, 10.0f) && approx(v[2].y - v[1].y, 14.0f),
+              "glyph quad spans BITMAP PIXELS, never normalized uv extents");
+        check(approx(v[1].u, 18.0f / 256.0f) && approx(v[2].v, 30.0f / 256.0f),
+              "uv spans the normalized atlas rect");
+        check(v[0].radius_tl > 1.0f, "contrast exponent travels to the text shader");
     }
 
     if (failures != 0) {
